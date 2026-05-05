@@ -1,0 +1,9 @@
+# Nhóm 1 - Nexus-1.5B
+
+## Danh sách thành viên và phân công công việc
+
+| Họ và Tên | Mã sinh viên | Vai trò / Công việc chính |
+|-----------|-------------|--------------------------|
+| Bùi Quang Đạt | B22DCKH027 | Nghiên cứu, đề xuất ý tưởng, viết báo cáo, slide |
+| Lã Quang Hải | B22DCKH037 | Nghiên cứu, đề xuất ý tưởng, viết báo cáo, slide |
+| Ngô Minh Phong | B22DCKH085 | Implementation, Training, Evaluation, Demo |

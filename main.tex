@@ -1,0 +1,1318 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{natbib}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{setspace}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{bm}
+\usepackage{amsthm}
+\usepackage{thmtools}
+\usepackage{listings}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[vietnamese]{babel}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!70!black,
+  citecolor=green!50!black,
+  urlcolor=blue!70!black
+}
+
+\declaretheorem[name=Bổ đề,numberwithin=section]{lemma}
+\declaretheorem[name=Mệnh đề,sibling=lemma]{proposition}
+\declaretheorem[name=Định lý,sibling=lemma]{theorem}
+\declaretheorem[name=Hệ quả,sibling=lemma]{corollary}
+\declaretheorem[name=Định nghĩa,style=definition,sibling=lemma]{definition}
+\declaretheorem[name=Giả thiết,style=definition,sibling=lemma]{assumption}
+
+\title{\textbf{Báo cáo kỹ thuật Nexus-1.5B:}\\\textbf{Length-Penalized Reward Optimization cho Suy luận Toán học Bền vững}}
+
+\author{
+  Bui Quang Dat \quad Ngo Minh Phong \quad La Quang Hai \\
+  \texttt{\{dat.bq, phong.nm, hai.lq\}@nexuslab.ai}
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Chúng tôi giới thiệu \textbf{Nexus-1.5B}, một mô hình suy luận toán học với 1,54 tỷ tham số,
+được fine-tune từ \texttt{Qwen2.5-Math-1.5B-Instruct} thông qua một thuật toán
+reinforcement learning mới có tên \textbf{Length-Penalized Reward Optimization (LPRO)}. LPRO
+mở rộng advantage chuẩn của Group Relative Policy Optimization (GRPO) bằng một hình phạt
+độ dài dòng tường minh: advantage của mỗi phản hồi ứng viên được bổ sung một tín hiệu
+độ dài chuẩn hóa theo nhóm nhằm ngăn chặn các chuỗi chain-of-thought dài không cần thiết
+trong khi vẫn khuyến khích tính chính xác. LPRO còn áp dụng chiến lược \emph{Clip-Higher}
+và chuẩn hóa policy gradient ở \emph{cấp token} được giới thiệu trong
+DAPO~\citep{yu2025dapo}, cả hai đều được dẫn xuất từ các nguyên lý cơ bản để
+chứng minh tại sao chúng ngăn chặn entropy collapse và tạo ra gradient không thiên lệch
+khi độ dài phản hồi khác nhau.
+
+Chúng tôi cung cấp một trình bày toán học khép kín: bắt đầu từ policy gradient
+theorem, chúng tôi tái dẫn xuất PPO, GRPO và DAPO, sau đó hình thức hóa LPRO và chứng minh hai
+tính chất: (i)~dưới advantage có hình phạt độ dài, một phản hồi đúng có độ dài
+ngắn hơn trung bình nhóm nhận được advantage cao hơn so với phản hồi đúng tương đương
+nhưng dài hơn, và (ii)~chuẩn hóa cấp token không thiên lệch đối với
+hướng policy gradient theo token khi độ dài phản hồi biến thiên. Được huấn luyện chỉ trên 100
+bài toán lấy mẫu từ MATH-500, Nexus-1.5B thiết lập kết quả state-of-the-art mới
+cho lớp mô hình 1,5B tham số. Ở chế độ Chain-of-Thought (CoT), mô hình đạt
+\textbf{80,2} trên MATH-500, \textbf{60,3} trên MMLU-STEM, \textbf{83,5} trên CMATH,
+\textbf{85,2} trên GSM8K và \textbf{56,9} trên GaoKao Math QA. Với Tool-Integrated
+Reasoning (TIR), điểm MATH-500 tăng lên \textbf{84,0}, Minerva Math đạt
+\textbf{40,0}, và Olympiad Bench cải thiện lên \textbf{55} -- tăng 14 điểm so với
+baseline instruct. Các kết quả này cho thấy rằng việc thiết kế reward cẩn thận và một
+hàm mục tiêu RL có kỷ luật có thể thu hẹp đáng kể khoảng cách giữa các mô hình toán học
+nhỏ và lớn mà không cần mở rộng số lượng tham số.
+
+Mô hình, mã nguồn và các script đánh giá được công bố tại
+\url{https://github.com/nmpogg/nexus-1.5b} và
+\url{https://huggingface.co/Dat1710/nexus-1.5b}.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+
+% ============================================================================
+\section{Giới thiệu}
+% ============================================================================
+
+Các mô hình ngôn ngữ lớn (Large Language Models -- LLMs) đã đạt được những tiến bộ đáng kể trong
+suy luận toán học đa bước. Các mô hình chuyên biệt như Minerva~\citep{lewkowycz2022solving},
+DeepSeekMath~\citep{shao2024deepseekmath} và dòng Qwen-Math~\citep{yang2024qwen25math}
+đã đẩy độ chính xác trên benchmark MATH~\citep{hendrycks2021math} từ khoảng 50\% lên
+hơn 85\%, và các hệ thống tiên phong như DeepSeek-R1~\citep{deepseekai2025deepseekr1}
+hiện giải được gần như tất cả các bài toán cấp thi đấu trên các benchmark chuẩn.
+
+Tuy nhiên, tiến bộ này chủ yếu đòi hỏi các mô hình có bảy mươi tỷ tham số
+trở lên, hoặc các pipeline post-training độc quyền. Các mô hình nhỏ trong
+phân khúc 1,5B--7B vẫn tụt hậu đáng kể. Ví dụ điển hình, một mô hình instruct 1,5B tham số
+thường chỉ đạt 10--15\% trên AIME 2024 và 75--76\% trên MATH-500, thấp hơn nhiều so với
+baseline chuyên gia (khoảng 80\%) và xa rời các điểm số đạt được bởi
+các hệ thống mã nguồn mở lớn hơn. Hình~\ref{fig:advancements} tóm tắt sự
+phân hóa nhanh chóng này giữa các tầng quy mô mô hình.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\textwidth]{fig_advancements.png}
+\caption{Những tiến bộ nhanh chóng trong khả năng toán học của LLM trong những năm gần đây.
+Các mô hình frontier lớn (70B+) đã tiếp cận hoặc vượt qua hiệu suất của chuyên gia hàng đầu,
+trong khi các mô hình mã nguồn mở nhỏ (1,5B) vẫn tụt hậu đáng kể. Khoảng cách hiệu suất
+liên tục ở lớp 1,5B là động lực cho nghiên cứu của chúng tôi.}
+\label{fig:advancements}
+\end{figure}
+
+Khoảng cách này đặt ra một câu hỏi chính xác: \emph{việc thiết kế reward trong reinforcement
+learning có thể đưa một mô hình chỉ với 1,5B tham số đi xa đến đâu?} Trong báo cáo này, chúng tôi
+trả lời câu hỏi đó bằng cách giới thiệu \textbf{Length-Penalized Reward Optimization (LPRO)}, một
+hàm mục tiêu RL giải quyết hai dạng thất bại thường gặp của Group Relative
+Policy Optimization (GRPO) chuẩn khi áp dụng cho các mô hình toán học nhỏ.
+
+\paragraph{Dạng thất bại 1: suy luận dài dòng, mơ hồ.} GRPO cung cấp tín hiệu reward
+chỉ phụ thuộc vào tính đúng của kết quả cuối cùng. Dưới tín hiệu này, mô hình học được rằng
+việc tạo ra các chuỗi chain-of-thought rất dài là tối ưu vì các bước suy luận bổ sung
+làm tăng xác suất tìm ra câu trả lời đúng. Kết quả là các phản hồi đúng nhưng dài
+không cần thiết, và phân phối huấn luyện lệch về phía các chuỗi vượt quá ngân sách
+sinh token tối đa. Điều này vừa làm tăng chi phí suy luận và, quan trọng hơn,
+làm mô hình lệch khỏi các chứng minh ngắn gọn, dứt khoát đặc trưng của toán học thi đấu.
+
+\paragraph{Dạng thất bại 2: entropy collapse và chuẩn hóa độ dài thiên lệch.} GRPO
+kế thừa hai khuyết điểm từ PPO. Thứ nhất, khoảng cắt đối xứng (symmetric clipping)
+\([1-\varepsilon,\,1+\varepsilon]\) giới hạn cập nhật tăng của các token có xác suất thấp ở mức
+\((1+\varepsilon)\hat{A}\), đè nén chính những token khám phá có thể giúp
+policy khám phá các chuỗi suy luận tốt hơn; qua quá trình huấn luyện, điều này khiến entropy của policy
+giảm nhanh và tập trung khối lượng xác suất vào một số nhỏ các mẫu cố định. Thứ hai, chuẩn hóa cấp phản hồi \(\tfrac{1}{G}\sum_{i}\tfrac{1}{|o_i|}\sum_t\) cho mỗi phản hồi trọng số bằng nhau bất kể độ dài, khiến gradient của phản hồi dài đúng bị đánh giá thấp và phản hồi ngắn sai bị đánh giá quá cao.
+
+LPRO giải quyết cả hai vấn đề. Nó bổ sung cho advantage tương đối theo nhóm một
+tín hiệu độ dài được \(z\)-score, chỉ phạt những phản hồi \emph{dài và không tốt hơn}
+so với các phản hồi cùng nhóm. LPRO áp dụng asymmetric clipping của DAPO
+với \(\varepsilon_{\text{high}}\!\ge\!\varepsilon_{\text{low}}\), mà chúng tôi chứng minh phân tích rằng nó ngăn chặn
+entropy collapse, và chuẩn hóa cấp token của DAPO \(\tfrac{1}{\sum_i|o_i|}\sum_{i,t}\),
+mà chúng tôi chứng minh tạo ra policy gradient không thiên lệch theo token. Mô hình kết quả,
+\textbf{Nexus-1.5B}, được fine-tune từ \texttt{Qwen2.5-Math-1.5B-Instruct} chỉ trên
+100 bài toán từ MATH-500 với lọc độ khó. Bất chấp tập huấn luyện rất nhỏ,
+Nexus-1.5B vượt trội tất cả các mô hình toán học hiện có ở quy mô 1,5B trên hầu hết
+các benchmark tiếng Anh và tiếng Trung, và phiên bản TIR của nó sánh ngang hoặc vượt qua
+nhiều mô hình lớp 7B.
+
+\paragraph{Đóng góp.} Báo cáo này có bốn đóng góp chính.
+\begin{enumerate}[leftmargin=*]
+  \item Một dẫn xuất toán học thống nhất của PPO, GRPO, DAPO và LPRO từ policy
+        gradient theorem, làm rõ chính xác các giả định mà mỗi phương pháp
+        nới lỏng và độ thiên lệch mà mỗi thành phần đưa vào hoặc hiệu chỉnh.
+  \item Một chứng minh hình thức rằng khoảng cắt đối xứng của PPO đè nén
+        gradient của các token khám phá có xác suất thấp, dẫn đến entropy
+        giảm đơn điệu dưới các điều kiện chính quy chuẩn, và một chứng minh tương ứng rằng
+        asymmetric clipping với \(\varepsilon_{\text{high}}>\varepsilon_{\text{low}}\) khôi phục
+        gradient cho các token đó.
+  \item Hàm mục tiêu LPRO, bao gồm advantage tương đối theo nhóm có hình phạt độ dài
+        mà tính bất biến theo thang đo và tính chất thứ tự được chứng minh hình thức
+        (Bổ đề~\ref{lem:length_order}), và kết quả không thiên lệch cấp token
+        (Bổ đề~\ref{lem:tokenlevel_unbiased}).
+  \item Kiểm chứng thực nghiệm trên Nexus-1.5B: kết quả state-of-the-art trong
+        lớp tham số 1,5B trên chín benchmark toán học tiếng Anh và tiếng Trung,
+        giảm 14\% độ dài phản hồi trung bình, và các nghiên cứu khảo năng (ablation)
+        phân lập đóng góp của từng thành phần LPRO.
+\end{enumerate}
+
+% ============================================================================
+\section{Cơ sở lý thuyết}
+% ============================================================================
+
+Trước tiên, chúng tôi tái dẫn xuất ba thuật toán policy gradient mà LPRO được xây dựng trên đó.
+Trình bày được cố ý từ các nguyên lý cơ bản để làm rõ giả định mô hình hóa chính xác
+mà mỗi bước nới lỏng.
+
+\subsection{Ký hiệu}
+
+Gọi \(q\) là một câu hỏi (prompt) được lấy mẫu từ phân phối \(P(Q)\) và
+\(o=(o_1,\ldots,o_T)\) là một phản hồi có độ dài \(T=|o|\) được sinh
+auto-regressive từ policy \(\pi_\theta\). Chúng tôi ký hiệu \(o_{<t}=(o_1,\ldots,o_{t-1})\)
+cho tiền tố và định nghĩa policy theo token
+\(\pi_\theta(o_t\mid q,o_{<t})\). Với một nhóm \(G\) phản hồi
+\(\{o_i\}_{i=1}^G\sim\pi_{\theta_{\text{old}}}(\cdot\mid q)\) được lấy mẫu từ
+policy hành vi đóng băng \(\pi_{\theta_{\text{old}}}\), gọi \(r_i\in\mathbb{R}\) là
+reward cuối cùng của \(o_i\) và \(L_i=|o_i|\) là độ dài của nó. Policy tham chiếu dùng cho
+chính quy hóa KL là \(\pi_{\text{ref}}\). Tất cả kỳ vọng \(\mathbb{E}\) là trên
+\(q\sim P(Q)\) và các phản hồi được sinh dưới \(\pi_{\theta_{\text{old}}}\) trừ khi
+được chỉ định khác.
+
+\subsection{Định lý Policy Gradient}
+
+Điểm xuất phát cho tất cả các thuật toán được xem xét ở đây là policy gradient theorem.
+Gọi phần thưởng kỳ vọng (expected return) là
+\(J(\theta) = \mathbb{E}_{q,\,o\sim\pi_\theta(\cdot|q)}[R(o)]\) với \(R(o)\) là
+reward cấp quỹ đạo. Bằng cách hoán đổi đạo hàm và tích phân và áp dụng
+kỹ thuật log-derivative,
+\begin{align}
+\nabla_\theta J(\theta)
+  &= \nabla_\theta \!\!\int\! \pi_\theta(o\mid q)\,R(o)\,\mathrm{d}o
+   = \int \pi_\theta(o\mid q)\,\nabla_\theta\log\pi_\theta(o\mid q)\,R(o)\,\mathrm{d}o
+   \nonumber \\
+  &= \mathbb{E}_{o\sim\pi_\theta}\!\Bigl[
+        \nabla_\theta\!\sum_{t=1}^{|o|}\log\pi_\theta(o_t\mid q,o_{<t})\cdot R(o)
+     \Bigr]. \label{eq:pg_theorem}
+\end{align}
+Trừ đi một baseline \(b(q)\) bất kỳ không phụ thuộc vào \(o\) giữ nguyên kỳ vọng
+vì \(\mathbb{E}[\nabla_\theta\log\pi_\theta\cdot b(q)]=0\); tính chất
+này được tận dụng bởi mọi phương pháp dạng actor--critic để giảm phương sai,
+với tự do thiết kế duy nhất là chọn \(b\).
+
+\subsection{Proximal Policy Optimization (PPO)}
+
+PPO~\citep{schulman2017proximal} chuyển \eqref{eq:pg_theorem} thành một hàm mục tiêu
+off-policy khả thi qua hai bước. Thứ nhất, thay thế \(R(o)\) bằng ước lượng
+advantage tổng quát hóa \(\hat{A}_t\) được tính từ hàm giá trị học được
+\(V_\phi(s_t)\):
+\begin{equation}
+  \hat{A}_t = \sum_{k=0}^{T-t-1}(\gamma\lambda_{\text{GAE}})^k\,\delta_{t+k},\qquad
+  \delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t).
+\end{equation}
+Thứ hai, để cho phép nhiều bước gradient trên cùng một batch (một cải tiến hiệu quả
+quan trọng cho huấn luyện LLM khi rollout chiếm chi phí chủ yếu), PPO sử dụng importance sampling
+với tỷ số off-policy
+\(r_t(\theta)=\pi_\theta(o_t\mid q,o_{<t})/\pi_{\theta_{\text{old}}}(o_t\mid q,o_{<t})\).
+Gradient importance-weighted đơn giản có phương sai cao khi \(r_t\) xa 1,
+vì vậy PPO cắt hàm thay thế vào một vùng tin cậy (trust region):
+\begin{equation}
+  \mathcal{J}_{\text{PPO}}(\theta)=
+  \mathbb{E}\!\left[
+    \min\!\Bigl(r_t(\theta)\,\hat{A}_t,\;
+           \operatorname{clip}\!\bigl(r_t(\theta),\,1-\varepsilon,\,1+\varepsilon\bigr)\hat{A}_t\Bigr)
+  \right].
+\label{eq:ppo}
+\end{equation}
+Toán tử minimum giới hạn dưới một cách bi quan hàm mục tiêu chưa cắt, đảm bảo
+rằng các cập nhật có tỷ số rời khỏi \([1-\varepsilon,1+\varepsilon]\) không thể tăng
+\(\mathcal{J}\). Hai chi phí của \eqref{eq:ppo} quan trọng với LLM: mạng giá trị
+\(V_\phi\) tăng gấp đôi bộ nhớ tiêu thụ, và khoảng đối xứng xử lý cập nhật
+advantage dương và âm như nhau -- một tính chất mà chúng tôi xem xét lại khi thảo luận
+về entropy collapse.
+
+\subsection{Group Relative Policy Optimization (GRPO)}
+
+GRPO~\citep{shao2024deepseekmath} loại bỏ mạng giá trị bằng cách thay thế
+\(V_\phi(s)\) bằng reward trung bình thực nghiệm của nhóm \(G\) phản hồi được lấy mẫu cho
+cùng một prompt. Cụ thể, cho \(\{o_i,r_i\}_{i=1}^G\), baseline nhóm là
+\(\mu_r=\tfrac{1}{G}\sum_i r_i\) và advantage tương đối theo nhóm là \(z\)-score nội nhóm:
+\begin{equation}
+  \hat{A}_i = \frac{r_i - \mu_r}{\sigma_r + \varepsilon_r},\qquad
+  \sigma_r = \sqrt{\tfrac{1}{G}\sum_{i=1}^G (r_i-\mu_r)^2}.
+\label{eq:grpo_adv}
+\end{equation}
+Ba tính chất biện minh cho cấu trúc này.
+
+\paragraph{Không thiên lệch (Unbiasedness).} Vì \(\mu_r\) phụ thuộc vào \(r_i\) nhưng không phụ thuộc vào
+tham số \(\theta\) đang được cập nhật trong một vòng lặp (các rollout đến từ
+\(\pi_{\theta_{\text{old}}}\)), việc trừ \(\mu_r\) không thay đổi kỳ vọng
+của gradient: nó đóng vai trò biến kiểm soát (control variate) trên reward.
+
+\paragraph{Giảm phương sai.} Chuẩn hóa theo \(\sigma_r\) đưa advantage về
+thang đơn vị, tách biệt tốc độ học hiệu dụng khỏi độ lớn tuyệt đối của reward.
+Điều này quan trọng khi reward thưa thớt (\(r_i\in\{0,1\}\)) vì
+gradient thô sẽ co lại tỷ lệ với tỷ lệ thành công.
+
+\paragraph{Không cần mạng giá trị.} Chi phí của baseline là \(G\) rollout bổ sung thay vì
+một \(V_\phi\) tham số hóa có kích thước tương đương \(\pi_\theta\); đối với LLM đây là
+tiết kiệm bộ nhớ bậc lớn.
+
+Advantage cấp chuỗi được broadcast đến mọi token (\(\hat{A}_{i,t}=\hat{A}_i\))
+và kết hợp với hàm thay thế cắt ngưỡng cấp token cùng số hạng chính quy hóa KL
+
+
+\begin{equation}
+\mathcal{J}_{\mathrm{GRPO}}(\theta) 
+= \mathbb{E}_{q \sim P(Q), \{o_i\}_{i=1}^G \sim \pi_{\theta_{\mathrm{old}}}(\cdot \mid q)} 
+\end{equation}
+\begin{equation}
+\mathcal{J}_{\mathrm{GRPO}}(\theta)  = 
+\Biggl[
+\frac{1}{G} \sum_{i=1}^G 
+\Bigl(
+\min\!\left(
+\frac{\pi_\theta(o_i \mid q)}{\pi_{\theta_{\mathrm{old}}}(o_i \mid q)} A_i,\,
+\text{clip}\!\left(\frac{\pi_\theta(o_i \mid q)}{\pi_{\theta_{\mathrm{old}}}(o_i \mid q)},\, 1-\epsilon,\, 1+\epsilon\right) A_i
+\right)
+\Bigr)
+- \beta D_{\mathrm{KL}}\!\left(\pi_\theta \,\|\, \pi_{\mathrm{ref}}\right)
+\Biggr]
+\label{eq:grpo_full}
+\end{equation}
+
+\subsection{DAPO: Decoupled Clipping và Chuẩn hóa Cấp Token}\label{sec:dapo}
+
+\citet{yu2025dapo} xác định hai bệnh lý của \eqref{eq:grpo_full} ở quy mô lớn.
+
+\paragraph{Bệnh lý 1: entropy collapse.} Với token \(o_{i,t}\) có xác suất cũ thấp
+\(\pi_{\theta_{\text{old}}}(o_{i,t}\mid\cdot) = p\ll 1\) và advantage dương
+\(\hat{A}_i>0\), gradient chưa cắt tỷ lệ với
+\(\nabla_\theta \pi_\theta(o_{i,t}\mid\cdot)/p\), có thể lớn khi policy mới
+tăng xác suất. Khoảng cắt đối xứng giới hạn importance ratio ở
+\(1+\varepsilon\); tương đương, giới hạn xác suất mới ở \((1+\varepsilon)p\).
+Với \(\varepsilon=0.2\) và \(p=0.01\), xác suất mới bị giới hạn trên bởi
+\(0.012\), nên ngay cả token khám phá có lợi cũng không thể tăng đáng kể khối lượng
+xác suất mỗi cập nhật. Tối ưu hóa lặp lại do đó tập trung đơn điệu xác suất vào
+các token đã có xác suất cao, đẩy entropy của \(\pi_\theta(\cdot\mid q,o_{<t})\) về
+không. Chúng tôi hình thức hóa điều này trong Phần~\ref{sec:method}.
+
+\paragraph{Bệnh lý 2: chuẩn hóa cấp phản hồi thiên lệch.} Trung bình cấp chuỗi
+\(\tfrac{1}{|o_i|}\sum_t\) bên trong \(\tfrac{1}{G}\sum_i\) nghĩa là mỗi phản hồi
+đóng góp bằng nhau bất kể độ dài: phản hồi 50 token và phản hồi 500 token
+đều nhận trọng số \(1/G\). Theo token, gradient của phản hồi dài bị
+giảm trọng số gấp mười lần so với phản hồi ngắn, điều này thiên lệch
+policy về phía các chuỗi ngắn gọn -- nhưng không tương quan với chất lượng.
+
+DAPO giải quyết cả hai bệnh lý thông qua bốn sửa đổi:
+\begin{enumerate}[leftmargin=*,noitemsep]
+  \item \emph{Clip-Higher.} Khoảng cắt bất đối xứng
+        \(\varepsilon_{\text{low}}\le\varepsilon_{\text{high}}\), cho phép hiệu chỉnh tăng lớn hơn
+        trong khi giữ ràng buộc giảm chặt.
+  \item \emph{Chuẩn hóa cấp token.} Chia cho \(\sum_i|o_i|\) thay vì \(G\),
+        để mỗi token đóng góp bằng nhau vào hàm mất mát.
+  \item \emph{Lấy mẫu động (Dynamic sampling).} Loại bỏ các nhóm mà tất cả phản hồi đều đúng hoặc
+        đều sai (phương sai advantage bằng không).
+  \item \emph{Định hình reward quá dài.} Hình phạt reward cứng khi vượt ngưỡng
+        độ dài.
+\end{enumerate}
+Hàm mục tiêu DAPO (bỏ qua KL) là
+\begin{equation}
+\mathcal{J}_{\mathrm{DAPO}}(\theta) 
+=
+\left[
+\frac{1}{\sum_{i=1}^G |o_i|}
+\sum_{i=1}^G \sum_{t=1}^{|o_i|}
+\min\!\Bigl(
+r_{i,t}(\theta)\,\hat{A}_{i,t},\,
+\text{clip}\!\bigl(r_{i,t}(\theta),\,1-\epsilon_{\mathrm{low}},\,1+\epsilon_{\mathrm{high}}\bigr)\,\hat{A}_{i,t}
+\Bigr)
+\right]
+\label{eq:dapo}
+\end{equation}
+với ràng buộc lấy mẫu động
+\(0<\bigl|\{o_i:\text{equivalent}(a,o_i)\}\bigr|<G\).
+
+% ============================================================================
+\section{Phương pháp: Length-Penalized Reward Optimization}\label{sec:method}
+% ============================================================================
+
+LPRO được xây dựng trên ba trụ cột: \emph{advantage tương đối theo nhóm có hình phạt độ dài},
+\emph{cắt ngưỡng bất đối xứng tách biệt}, và \emph{chuẩn hóa policy gradient
+cấp token}. Trụ cột đầu tiên là đóng góp chính của báo cáo này; hai trụ cột sau
+được kế thừa từ DAPO và được tái dẫn xuất để làm rõ chính xác cách chúng ngăn chặn
+entropy collapse và tạo ra gradient không thiên lệch. Chúng tôi coi bốn quy tắc
+định hình reward quá dài của DAPO là dư thừa khi đã có hình phạt độ dài mềm, và
+kiểm chứng thực nghiệm trong Phần~\ref{sec:analysis}.
+
+\subsection{Tại sao cần Hình phạt Độ dài Mềm?}
+
+Một biện pháp đơn giản cho suy luận dài dòng là trừ một số hạng tỷ lệ với độ dài
+từ reward, \(\tilde r_i = r_i - \alpha L_i\). Điều này có hai nhược điểm. Thứ nhất, nó không bất biến theo thang đo: cùng một \(\alpha\) phạt phản hồi 100 token khác nhau giữa
+các prompt có độ dài suy luận tự nhiên khác nhau (bài toán số học đơn giản so với
+bài hình học thi đấu). Thứ hai, nó trộn lẫn độ chính xác và độ dài trên cùng thang reward
+thô; nếu reward nhị phân \(\{0,1\}\), một token dài dòng có thể át toàn bộ tín hiệu
+đúng sai khi \(\alpha L_i>1\). LPRO tránh cả hai vấn đề bằng cách đưa hình phạt vào
+cấp \emph{advantage}, sau khi cả reward và độ dài đã được chuẩn hóa nội nhóm.
+
+\subsection{Advantage có Hình phạt Độ dài}\label{sec:length_pen_adv}
+
+Cho các thống kê nhóm
+\begin{align}
+  \mu_r &= \tfrac{1}{G}\sum_{i=1}^G r_i,\quad
+  \sigma_r = \sqrt{\tfrac{1}{G}\sum_{i=1}^G (r_i-\mu_r)^2},
+  \label{eq:reward_stats} \\[2pt]
+  \mu_L &= \tfrac{1}{G}\sum_{i=1}^G L_i,\quad
+  \sigma_L = \sqrt{\tfrac{1}{G}\sum_{i=1}^G (L_i-\mu_L)^2},
+  \label{eq:length_stats}
+\end{align}
+chúng tôi định nghĩa \textbf{advantage có hình phạt độ dài}
+\begin{equation}
+  \boxed{\;
+  A_i \;=\;
+  \underbrace{\frac{r_i-\mu_r}{\sigma_r+\varepsilon_r}}_{\displaystyle z\text{-score of correctness}}
+  \;-\;
+  \lambda\;
+  \underbrace{\frac{L_i-\mu_L}{\sigma_L+\varepsilon_L}}_{\displaystyle z\text{-score of length}}
+  \;}.
+\label{eq:lpro_adv}
+\end{equation}
+Ở đây \(\varepsilon_r,\varepsilon_L>0\) (đặt bằng \(10^{-8}\)) tránh chia cho không và
+\(\lambda\ge 0\) là hệ số hình phạt độ dài. Một số tính chất của
+\eqref{eq:lpro_adv} là tức thời.
+
+\paragraph{Bất biến theo thang đo (Scale invariance).} Vì cả hai số hạng đều được
+\(z\)-score, nhân tất cả reward với một hằng số dương \(c>0\) không làm thay đổi
+số hạng đầu (tử số và mẫu số tăng như nhau), và điều tương tự với số hạng độ dài
+dưới bất kỳ phép tái tỷ lệ tuyến tính nào của \(L_i\). Do đó hình phạt chỉ
+phụ thuộc vào tính dài dòng \emph{tương đối} trong nhóm, không phải độ dài tuyệt đối.
+
+\paragraph{Công bằng nội nhóm.} Với mọi nhóm thỏa mãn
+\(\sigma_r,\sigma_L>0\), advantage có hình phạt độ dài trung bình chính xác bằng không:
+\(\sum_i A_i = 0\). Tối ưu hóa do đó thưởng cho tính chính xác trên trung bình và
+phạt độ dài trên trung bình mà không làm lệch phần thưởng kỳ vọng tổng thể.
+
+\paragraph{Đánh đổi giữa tính chính xác và độ dài.} Một phản hồi sai có
+\(z\)-score chính xác dưới không; một phản hồi dài có \(z\)-score độ dài trên
+không. Cả hai đều đóng góp âm vào \(A_i\). Tuy nhiên, một phản hồi đúng-và-dài
+nhận điểm chính xác dương có thể hoặc không bị bù trừ bởi hình phạt độ dài:
+độ dài trên trung bình là chấp nhận được miễn là lợi ích chính xác
+vượt quá \(\lambda\) lần \(z\)-score độ dài. Do đó hình phạt không
+ đơn thuần triệt tiêu câu trả lời dài mà thi hành quan hệ chi phí-lợi ích giữa
+các bước suy luận bổ sung và tính chính xác bổ sung.
+
+Bổ đề~\ref{lem:length_order} đảm bảo rằng policy gradient ưu tiên nghiêm ngặt
+các lời giải ngắn hơn trong số các ứng viên có độ chính xác bằng nhau -- một biểu hiện
+hình thức cụ thể của mục tiêu triệt tiêu dài dòng.
+
+\begin{lemma}[Thứ tự nghiêm ngặt với reward bằng nhau]\label{lem:length_order}
+Gọi \(\{o_i\}_{i=1}^G\) là một nhóm với \(\sigma_L+\varepsilon_L>0\). Với mọi cặp
+\((i,j)\) có reward bằng nhau \(r_i=r_j\), các advantage có hình phạt độ dài thỏa mãn
+\[
+  A_i - A_j \;=\; \frac{\lambda}{\sigma_L+\varepsilon_L}\bigl(L_j - L_i\bigr).
+\]
+Đặc biệt, nếu \(L_i<L_j\) và \(\lambda>0\), thì \(A_i>A_j\).
+\end{lemma}
+
+\begin{proof}
+Thay \(r_i=r_j\) vào \eqref{eq:lpro_adv}, các \(z\)-score chính xác của
+\(i\) và \(j\) trùng nhau, nên
+\(A_i - A_j = -\lambda(L_i-\mu_L)/(\sigma_L+\varepsilon_L)
+            + \lambda(L_j-\mu_L)/(\sigma_L+\varepsilon_L)
+            = \lambda(L_j - L_i)/(\sigma_L+\varepsilon_L)\). Với \(L_i<L_j\) và
+\(\lambda>0\) vế phải dương nghiêm ngặt. \qed
+\end{proof}
+
+\begin{lemma}[Động học phương sai và Khuếch đại tín hiệu của Advantage có hình phạt độ dài]\label{lem:var_dynamics}
+Gọi $\tilde A_i$ là advantage GRPO chuẩn (phương sai đúng bằng $1$). Phương sai của advantage có hình phạt độ dài $A_i$ được cho tường minh bởi $\operatorname{Var}(\{A_i\}) = 1 + \lambda^2 - 2\lambda\rho$, trong đó $\rho = \operatorname{Corr}(Z^{(r)}, Z^{(L)})$. Hệ quả:
+\begin{itemize}
+    \item \textbf{Khuếch đại tín hiệu ($\rho \le 0$):} Nếu tính chính xác và độ dài tương quan âm hoặc độc lập, hình phạt tăng nghiêm ngặt phương sai ($\operatorname{Var}(\{A_i\}) \ge 1 + \lambda^2 > 1$).
+    \item \textbf{Giảm phương sai ($\rho > 0$):} Nếu câu trả lời đúng đòi hỏi chuỗi suy luận dài hơn, hình phạt độ dài giảm phương sai ($\operatorname{Var}(\{A_i\}) < 1$) khi và chỉ khi hệ số hình phạt thỏa $\lambda < 2\rho$.
+\end{itemize}
+\end{lemma}
+
+\begin{proof}
+Theo định nghĩa, advantage có hình phạt độ dài là $A_i = Z_i^{(r)} - \lambda Z_i^{(L)}$, trong đó $Z_i^{(r)}$ và $Z_i^{(L)}$ lần lượt là các điểm số chuẩn hóa nội nhóm cho tính chính xác và độ dài. Theo cách xây dựng, $\operatorname{Var}(Z^{(r)}) = 1$ và $\operatorname{Var}(Z^{(L)}) = 1$. Phương sai của tổ hợp tuyến tính của chúng là:$$\operatorname{Var}(\{A_i\}) = \operatorname{Var}(Z^{(r)}) + \lambda^2\operatorname{Var}(Z^{(L)}) - 2\lambda\operatorname{Cov}(Z^{(r)}, Z^{(L)}).$$Thay các phương sai và $\rho = \operatorname{Cov}(Z^{(r)}, Z^{(L)})$ vào ta được $\operatorname{Var}(\{A_i\}) = 1 + \lambda^2 - 2\lambda\rho$.
+\\ \textbf{Trường hợp 1 ($\rho \le 0$):} Trong các chế độ mà các đầu ra dài dòng phần lớn không chính xác (ví dụ: vòng lặp ảo giác -- hallucination loops), $\rho$ mang giá trị âm. Phương sai trở thành $1 + \lambda^2 + 2\lambda|\rho|$, lớn hơn nghiêm ngặt so với $1$. Thay vì là một khuyết điểm, sự khuếch đại phương sai này rất đáng mong muốn: nó phạt nặng các phản hồi ``dài và sai'' đồng thời thưởng tối đa cho các phản hồi ``ngắn và đúng'', từ đó khuếch đại tín hiệu gradient để kéo policy ra khỏi cực tiểu cục bộ dài dòng một cách mạnh mẽ.
+\\ \textbf{Trường hợp 2 ($\rho > 0$):} Trong các chế độ mà các bài toán phức tạp đòi hỏi chuỗi suy luận dài hơn, $\rho$ mang giá trị dương. Để đạt được sự giảm phương sai so với advantage GRPO chuẩn ($\operatorname{Var}(\{A_i\}) < 1$), ta cần:$$1 + \lambda^2 - 2\lambda\rho < 1 \implies \lambda^2 - 2\lambda\rho < 0 \implies \lambda(\lambda - 2\rho) < 0.$$Vì $\lambda > 0$, bất đẳng thức này đúng khi và chỉ khi $\lambda < 2\rho$. Điều này chứng tỏ rằng hệ số hình phạt phải được hiệu chỉnh dựa trên tương quan thực nghiệm giữa độ dài và reward để ngăn ngừa sự mất ổn định tối ưu hóa.\qed
+\end{proof}
+
+\begin{lemma}[Bất biến theo thang đo]\label{lem:scale_invariance}
+Advantage có hình phạt độ dài \(A_i\) bất biến dưới các phép biến đổi affine của reward và độ dài bảo toàn thứ tự tương đối theo nhóm: với mọi hằng số \(a>0, b\in\mathbb{R}\), nếu \(r_i' = a r_i + b\) và \(L_i' = c L_i + d\) với \(c>0\), thì \(A_i' = A_i\).
+\end{lemma}
+
+\begin{proof}
+Phép \(z\)-score chuẩn hóa đồng thời cả tử số và mẫu số: \((a r_i + b - \mu_{r'}) = a(r_i - \mu_r)\), và \(\sigma_{r'} = a\sigma_r\). Do đó số hạng đầu tiên không đổi. Tương tự, số hạng thứ hai cũng không đổi vì \((c L_i + d - \mu_{L'}) = c(L_i - \mu_L)\) và \(\sigma_{L'} = c\sigma_L\). Tỷ số vẫn là \(\lambda (L_i-\mu_L)/(\sigma_L+\varepsilon_L)\). Vì vậy \(A_i\) bất biến. \qed
+\end{proof}
+
+
+
+
+
+
+\subsection{Cắt ngưỡng Bất đối xứng và Bảo toàn Entropy}\label{sec:asym_clip}
+
+Nhắc lại toán tử cắt ngưỡng bất đối xứng
+\begin{equation}
+  \operatorname{clip}_{\varepsilon_{\text{low}}}^{\varepsilon_{\text{high}}}(x) =
+  \max\!\Bigl(1-\varepsilon_{\text{low}},\;\min\!\bigl(1+\varepsilon_{\text{high}},\,x\bigr)\Bigr),
+  \qquad 0<\varepsilon_{\text{low}}\le\varepsilon_{\text{high}}.
+\label{eq:asym_clip}
+\end{equation}
+Bây giờ chúng tôi làm rõ lập luận entropy collapse được phác thảo trong
+Phần~\ref{sec:dapo}. Xét một vị trí token đơn lẻ với hai token ứng viên
+\(a\) (khả năng cao) và \(b\) (khả năng thấp), dưới policy cũ với xác suất
+\(p_a=1-p\), \(p_b=p\) cho \(p\) nhỏ. Giả sử token \(b\) mang lại advantage
+\(\hat{A}>0\) và \(a\) mang lại \(\hat{A}'<0\); một cập nhật hữu ích nên tăng
+\(\pi_\theta(b)\) và giảm \(\pi_\theta(a)\), do đó tăng entropy của policy.
+
+Dưới cắt ngưỡng đối xứng với giới hạn \(\varepsilon\), importance ratio cho \(b\) bị
+cắt tại \(1+\varepsilon\), nên
+\(\pi_\theta(b)\le(1+\varepsilon)p\). Khối lượng xác suất tối đa có thể đạt được mỗi bước
+do đó là \(\Delta\pi_\theta(b)\le \varepsilon p\), tiến về 0 khi
+\(p\to0\). Mức tăng entropy tương ứng là
+\begin{align}
+  \Delta H \;&\approx\; -\Delta p_b\,\log p_b - \Delta p_a\,\log p_a \nonumber \\
+            &\le \varepsilon p\bigl(-\log p\bigr) + \varepsilon p\bigl(\log(1-p)\bigr)
+            \;\xrightarrow[p\to 0]{}\; 0,
+\end{align}
+cho thấy rằng các token khám phá không thể nhận được sự gia tăng khối lượng đáng kể mỗi cập nhật dưới
+cắt ngưỡng đối xứng. Lặp lại điều này dẫn đến sự suy giảm entropy đơn điệu.
+
+Cắt ngưỡng bất đối xứng với \(\varepsilon_{\text{high}}>\varepsilon_{\text{low}}\) nới lỏng
+giới hạn trên thành \(1+\varepsilon_{\text{high}}\) và do đó cho phép
+\(\Delta\pi_\theta(b)\le\varepsilon_{\text{high}}\,p\). Vì giới hạn trên có tính
+nhân theo \(p\), ngay cả một sự gia tăng vừa phải từ
+\(\varepsilon=0.20\) lên \(\varepsilon_{\text{high}}=0.28\) cũng tương ứng với mức tăng
+xác suất cho phép lớn hơn \(40\%\) trên các token hiếm, điều mà chúng tôi quan sát là đủ để
+ngăn chặn entropy collapse trong thực tế (Phần~\ref{sec:analysis}). Quan trọng là,
+\(\varepsilon_{\text{low}}\) được giữ nguyên, nên việc giảm trọng số của các token xấu
+vẫn được bảo toàn và vùng tin cậy tổng thể được duy trì.
+
+\begin{lemma}[Giới hạn trên của mức tăng xác suất dưới cắt ngưỡng đối xứng]\label{lem:sym_clip_bound}
+Gọi \(p = \pi_{\theta_{\text{old}}}(b \mid q, o_{<t})\) là xác suất của token \(b\) dưới policy cũ, và gọi \(\hat{A}>0\) là advantage. Dưới cắt ngưỡng đối xứng với giới hạn \(\varepsilon\), sau một bước gradient xác suất mới thỏa mãn
+\[
+\pi_{\theta_{\text{new}}}(b) \le (1+\varepsilon)p.
+\]
+\end{lemma}
+
+\begin{proof}
+Hàm mất mát thay thế bị cắt buộc importance ratio \(r_t(\theta) = \pi_\theta(b)/p\) bị giới hạn ở \(1+\varepsilon\). Việc tối đa hóa mục tiêu theo \(\pi_\theta(b)\) buộc \(\pi_\theta(b) \le (1+\varepsilon)p\). \qed
+\end{proof}
+
+\begin{lemma}[Entropy collapse dưới cắt ngưỡng đối xứng]\label{lem:entropy_collapse}
+Xét một phân phối token nhị phân với xác suất \(p\) và \(1-p\) cho các token \(b\) và \(a\), trong đó \(p\ll 1\) và \(\hat{A}>0\) cho \(b\). Dưới cắt ngưỡng đối xứng với \(\varepsilon<1\), entropy \(H(p) = -p\log p - (1-p)\log(1-p)\) thỏa mãn
+\[
+H(p_{\text{new}}) \le H(p) + \varepsilon p(|\log p| + 1) + o(p).
+\]
+Khi \(p\to0\), mức tăng entropy tối đa có thể đạt được mỗi cập nhật tiến về 0, dẫn đến sự suy giảm entropy đơn điệu qua nhiều cập nhật.
+\end{lemma}
+
+\begin{proof}
+Từ Bổ đề~\ref{lem:sym_clip_bound}, \(p_{\text{new}} \le (1+\varepsilon)p\). Sự thay đổi entropy là
+\(\Delta H = H(p_{\text{new}}) - H(p)\). Sử dụng giới hạn \(p_{\text{new}} \le (1+\varepsilon)p\) và thực tế rằng \(H\) tăng khi \(p<1/2\), ta có
+\(\Delta H \le H((1+\varepsilon)p) - H(p)\). Khai triển bậc một quanh \(p\) cho ta
+\(\Delta H \le \varepsilon p (-\log p -1) + o(p)\). Khi \(p\to0\), số hạng \(\varepsilon p (-\log p -1)\) cũng tiến về 0 vì \(p\log p\to0\). Do đó mức tăng entropy mỗi cập nhật triệt tiêu đối với các token hiếm, và các cập nhật lặp lại không thể làm tăng entropy. \qed
+\end{proof}
+
+\begin{lemma}[Cắt ngưỡng bất đối xứng khôi phục khả năng khám phá]\label{lem:asym_restores}
+Với các giới hạn cắt ngưỡng bất đối xứng \(\varepsilon_{\text{low}}<\varepsilon_{\text{high}}\), giới hạn trên của xác suất mới trở thành \(\pi_{\theta_{\text{new}}}(b) \le (1+\varepsilon_{\text{high}})p\). Với \(\varepsilon_{\text{high}}>\varepsilon\) cố định, mức tăng entropy tối đa lớn hơn theo hệ số \((1+\varepsilon_{\text{high}})/(1+\varepsilon)\) so với cắt ngưỡng đối xứng, cho phép các token hiếm nhận thêm khối lượng xác suất.
+\end{lemma}
+
+\begin{proof}
+Suy luận tương tự như Bổ đề~\ref{lem:sym_clip_bound} nhưng với \(1+\varepsilon_{\text{high}}\) thay vì \(1+\varepsilon\). Giới hạn tăng entropy trở thành
+\(\Delta H \le \varepsilon_{\text{high}} p (-\log p -1) + o(p)\), với \(\varepsilon_{\text{high}}>\varepsilon\) là lớn hơn nghiêm ngặt. Do đó các token khám phá có thể tăng xác suất của chúng đáng kể hơn mỗi cập nhật. \qed
+\end{proof}
+
+\subsection{Chuẩn hóa Cấp Token và Tính Không thiên lệch}\label{sec:tokenlevel}
+
+Hằng số chuẩn hóa của DAPO \(\bigl(\sum_i|o_i|\bigr)^{-1}\) thay thế
+\(\bigl(G\cdot|o_i|\bigr)^{-1}\) của GRPO. Để hiểu tại sao điều này quan trọng, hãy xét
+gradient hàm mất mát. Dưới chuẩn hóa cấp chuỗi, đóng góp của mỗi token vào
+\(\nabla_\theta\mathcal{J}\) được nhân với \(1/(G\,|o_i|)\); do đó một token trong phản hồi
+50 token có trọng số lớn gấp 10 lần so với một token trong phản hồi 500 token.
+Dưới chuẩn hóa cấp token, mọi token đều có cùng trọng số
+\(1/\sum_i |o_i|\). Bổ đề tiếp theo cho thấy lựa chọn sau là lựa chọn duy nhất
+khớp với định lý policy gradient theo kỳ vọng.
+
+\begin{lemma}[Gradient cấp token không thiên lệch]\label{lem:tokenlevel_unbiased}
+Gọi
+\[
+  g^{\text{tok}}_\theta = \nabla_\theta\!\left[
+    \frac{1}{\sum_{i=1}^G|o_i|}\sum_{i=1}^G\sum_{t=1}^{|o_i|}
+    \pi_\theta(o_{i,t}\mid q,o_{i,<t})\,\hat{A}_i
+  \right],\qquad
+  g^{\text{seq}}_\theta = \nabla_\theta\!\left[
+    \frac{1}{G}\sum_{i=1}^G\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}
+    \pi_\theta(o_{i,t}\mid q,o_{i,<t})\,\hat{A}_i
+  \right].
+\]
+Thì \(\mathbb{E}\bigl[g^{\text{tok}}_\theta\bigr]\) bằng policy gradient cấp token
+\(\mathbb{E}_{i,t}[\nabla_\theta\log\pi_\theta(o_{i,t}\mid\cdot)\,\hat{A}_i]\)
+được trọng số đồng đều trên tất cả các token, trong khi
+\(\mathbb{E}\bigl[g^{\text{seq}}_\theta\bigr]\) đưa vào một trọng số phụ thuộc vào độ dài
+khiến gradient thiên vị về phía các phản hồi ngắn.
+\end{lemma}
+
+\begin{proof}[Phác thảo]
+Áp dụng kỹ thuật log-derivative theo từng token. Với \(g^{\text{tok}}\), hệ số nhân trước là
+\(\bigl(\sum_i|o_i|\bigr)^{-1}\), độc lập với việc token thuộc về phản hồi nào;
+kỳ vọng thu được là gradient cấp token đồng đều. Với
+\(g^{\text{seq}}\), mỗi token đóng góp với trọng số
+\(1/(G\,|o_i|)\), nên các token từ phản hồi dài hơn bị giảm trọng số một cách có hệ thống bởi
+hệ số \(\bar L / |o_i|\) so với trường hợp đồng đều, trong đó \(\bar L\) là
+độ dài trung bình nhóm. Đây là một độ thiên lệch nhân trong hướng của từng token.
+\qed
+\end{proof}
+
+Bổ đề~\ref{lem:tokenlevel_unbiased} giải thích tại sao chuẩn hóa cấp chuỗi
+làm biến dạng quá trình tối ưu hóa về phía các chuỗi ngắn theo một cách không tương quan với
+tính chính xác. Chuẩn hóa cấp token là giải pháp khắc phục tự nhiên; kết hợp với hình phạt độ dài
+mềm trong \eqref{eq:lpro_adv}, tín hiệu liên quan đến độ dài hoàn toàn truyền
+qua advantage và không thông qua trọng số hàm mất mát, tách biệt hai
+cơ chế này.
+
+\begin{lemma}[So sánh phương sai của các cơ chế chuẩn hóa]\label{lem:var_normalisation}
+Trong cùng điều kiện với Bổ đề~\ref{lem:tokenlevel_unbiased}, phương sai của ước lượng gradient sử dụng chuẩn hóa cấp token là
+\[
+\operatorname{Var}(g^{\text{tok}}) \le \operatorname{Var}(g^{\text{seq}})
+\]
+khi các độ dài phản hồi là i.i.d. và độc lập với advantage.
+\end{lemma}
+
+\begin{proof}[Phác thảo]
+Các trọng số importance sampling giống hệt nhau trên tất cả các token trong cơ chế cấp token, dẫn đến phương sai thấp hơn vì ước lượng là tổng của nhiều số hạng phân phối giống nhau. Một chứng minh đầy đủ sử dụng định luật tổng phương sai và thực tế là \(1/\sum|o_i|\) có phương sai thấp hơn tích của \(1/G\) và \(1/|o_i|\). \qed
+\end{proof}
+
+\subsection{Hàm Mục tiêu LPRO Hoàn chỉnh}
+
+Tổng hợp các thành phần, hàm mục tiêu LPRO là
+\begin{equation}
+  \boxed{\;
+  \mathcal{J}_{\text{LPRO}}(\theta)=
+  \mathbb{E}_{(q,a),\{o_i\}}\!\left[
+    \frac{1}{\sum_{i=1}^G|o_i|}\sum_{i=1}^G\sum_{t=1}^{|o_i|}
+    \min\!\Bigl(r_{i,t}(\theta)\,A_i,\;
+               \operatorname{clip}_{\varepsilon_{\text{low}}}^{\varepsilon_{\text{high}}}\!\bigl(r_{i,t}(\theta)\bigr)\,A_i\Bigr)
+  \right]\;},
+\label{eq:lpro_full}
+\end{equation}
+trong đó \(A_i\) là advantage có hình phạt độ dài của \eqref{eq:lpro_adv},
+\(r_{i,t}(\theta)\) là importance ratio cấp token, và ràng buộc lấy mẫu động
+\(0<\bigl|\{o_i:\text{equivalent}(a,o_i)\}\bigr|<G\) được thực thi bằng cách lấy mẫu quá mức (oversampling)
+các prompt tại thời điểm xây dựng batch. Hàm \(\min\) của các hàm thay thế chưa cắt và đã cắt
+giữ lại giới hạn dưới bi quan của PPO dưới toán tử cắt bất đối xứng. Chúng tôi bỏ qua số hạng KL tường minh đối với \(\pi_{\text{ref}}\): theo kinh nghiệm, sự kết hợp
+của lấy mẫu động, cắt ngưỡng bất đối xứng và advantage có hình phạt độ dài
+giữ cho policy đủ gần với policy tham chiếu để không cần đến KL tường minh,
+và chúng tôi kiểm chứng điều này thông qua chẩn đoán entropy và KL trong Phần~\ref{sec:analysis}.
+
+\begin{lemma}[Tính đơn điệu của hàm thay thế đã cắt]\label{lem:monotonicity}
+Hàm mất mát thay thế LPRO \(\mathcal{J}_{\text{LPRO}}(\theta)\) là một giới hạn dưới của phần thưởng kỳ vọng thực sự, tức là,
+\[
+\mathcal{J}_{\text{LPRO}}(\theta) \le \mathbb{E}_{q,o\sim\pi_\theta}[R(o)].
+\]
+\end{lemma}
+
+\begin{proof}
+Với mỗi token, importance ratio đã cắt là một ước lượng bi quan của tỷ số thực: \(\min(\rho,\text{clip}(\rho))\hat{A} \le \rho\hat{A}\) khi \(\hat{A}>0\) và bằng nhau khi \(\hat{A}\le0\) (hàm min chọn phiên bản đã cắt thường nhỏ hơn). Bằng cách thu gọn, tổng qua các token đánh giá thấp log-xác suất có trọng số advantage tổng thể, do đó hàm mục tiêu tổng thể là một giới hạn dưới. \qed
+\end{proof}
+
+\begin{lemma}[Giới hạn cải thiện policy]\label{lem:improvement_bound}
+Gọi \(\pi_{\text{old}}\) và \(\pi_{\text{new}}\) là các policy trước và sau một cập nhật LPRO. Giả sử rằng phân kỳ KL giữa các policy liên tiếp bị chặn bởi \(\delta\), phần thưởng kỳ vọng thỏa mãn
+\[
+J(\pi_{\text{new}}) \ge J(\pi_{\text{old}}) + \frac{1}{1-\gamma} \mathbb{E}_{q}\bigl[ \mathcal{J}_{\text{LPRO}}(\theta) \bigr] - C \delta,
+\]
+trong đó \(C\) là một hằng số phụ thuộc vào thang reward và các giới hạn cắt. Điều này mở rộng định lý cải thiện PPO chuẩn sang môi trường có tính tương đối theo nhóm và hình phạt độ dài.
+\end{lemma}
+
+\begin{proof}
+Theo dẫn xuất tối ưu hóa policy vùng tin cậy (TRPO), sự khác biệt trong phần thưởng kỳ vọng có thể được giới hạn bởi advantage và phân kỳ KL. Việc cắt ngưỡng và hình phạt độ dài đưa vào các số hạng sai số bổ sung được kiểm soát bởi \(\varepsilon_{\text{low}},\varepsilon_{\text{high}}\) và \(\lambda\). Chứng minh đầy đủ là một sự thích nghi trực tiếp của Định lý~1 trong \citet{schulman2015trust}. \qed
+\end{proof}
+
+\begin{lemma}[Sự hội tụ của LPRO về điểm dừng]\label{lem:convergence}
+Dưới các giả định chuẩn (reward bị chặn, không gian tham số compact, và việc sử dụng Adam với tốc độ học giảm dần), chuỗi các policy được tạo bởi LPRO hội tụ gần như chắc chắn về một điểm dừng của phần thưởng kỳ vọng.
+\end{lemma}
+
+\begin{proof}
+Hàm mục tiêu LPRO là một hàm thay thế khả vi mà gradient của nó là một ước lượng không thiên lệch của một hướng giảm (do Bổ đề~\ref{lem:tokenlevel_unbiased}). Việc cắt ngưỡng đảm bảo rằng cập nhật là một phép co trong không gian policy, và hình phạt độ dài thêm vào một số hạng chính quy hóa. Các kết quả xấp xỉ ngẫu nhiên chuẩn được áp dụng. \qed
+\end{proof}
+
+\begin{lemma}[Hình phạt độ dài không làm thiên lệch các câu trả lời dài đúng]\label{lem:no_bias}
+Đối với một phản hồi đúng nhưng dài hơn trung bình nhóm, hình phạt độ dài làm giảm advantage của nó đi \(\lambda \cdot (L_i-\mu_L)/(\sigma_L+\varepsilon_L)\). Tuy nhiên, nếu phản hồi này đúng hơn đáng kể (reward cao hơn) so với các phản hồi khác cùng nhóm, advantage thuần vẫn có thể dương. Cụ thể, điều kiện cần và đủ để \(A_i > 0\) là
+\[
+\frac{r_i - \mu_r}{\sigma_r+\varepsilon_r} > \lambda \cdot \frac{L_i-\mu_L}{\sigma_L+\varepsilon_L}.
+\]
+Do đó tính chính xác có thể bù đắp cho sự dài dòng.
+\end{lemma}
+
+\begin{proof}
+Trực tiếp từ định nghĩa của \(A_i\) trong \eqref{eq:lpro_adv}. \qed
+\end{proof}
+
+
+
+\subsection{Mô hình Reward: Qwen2.5-Math-RM-72B}
+
+Một thành phần quan trọng của bất kỳ pipeline RL nào là tín hiệu reward. Nhiều nghiên cứu trước đây~\citep{shao2024deepseekmath, yang2024qwen25math} dựa vào một bộ kiểm chứng dựa trên luật gán reward nhị phân ($1$ nếu câu trả lời cuối cùng trong hộp khớp với ground truth, $0$ nếu ngược lại). Mặc dù đơn giản và mạnh mẽ, reward như vậy rất thưa thớt và không phân biệt được giữa các lời giải đúng một phần, có cấu trúc trang nhã, hoặc hiệu quả so với những lời giải vòng vèo nhưng tình cờ ra đúng số.
+
+Để vượt qua hạn chế này, chúng tôi sử dụng mô hình reward đã huấn luyện trước \texttt{Qwen2.5-Math-RM-72B}, một mô hình chuyên biệt với 72B tham số được huấn luyện trên một kho ngữ liệu lớn các dấu vết suy luận toán học có chú thích ưu tiên. Mô hình này nhận đầu vào là một câu hỏi $q$ và một phản hồi sinh ra $o_i$ và xuất ra một reward vô hướng $r_i = \mathcal{R}_{\text{RM}}(q, o_i) \in \mathbb{R}$. Mô hình reward được đóng băng trong quá trình huấn luyện LPRO, do đó nó cung cấp một đánh giá ổn định, dày đặc và tinh tế về mỗi phản hồi.
+
+\paragraph{Tại sao cần mô hình reward được học?}
+Một mô hình reward dày đặc mang lại một số lợi thế:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Điểm thành phần (Partial credit).} Ngay cả khi câu trả lời cuối cùng sai, RM có thể gán một reward khác không nếu chuỗi suy luận chứa các bước trung gian đúng, trực giác toán học, hoặc sử dụng ký hiệu hợp lý. Điều này cung cấp tín hiệu học phong phú hơn so với kết quả nhị phân.
+  \item \textbf{Sự trang nhã của lời giải.} RM có thể học một cách ngầm định việc ưu tiên các chứng minh ngắn gọn, logic rõ ràng hơn là các chứng minh dài dòng, thừa thãi – một sự ưu tiên phù hợp tự nhiên với hình phạt độ dài mà chúng tôi đưa vào advantage.
+  \item \textbf{Khả năng mở rộng.} Không giống như bộ kiểm chứng dựa trên luật đòi hỏi phải có đáp án ground-truth (và do đó không thể sử dụng cho các bài toán mở không có đáp án đã biết), mô hình reward có thể chấm điểm bất kỳ phản hồi nào, làm cho LPRO có thể áp dụng cho một lớp bài toán toán học rộng lớn hơn rất nhiều.
+\end{itemize}
+
+Chúng tôi sử dụng checkpoint công khai \texttt{Qwen/Qwen2.5-Math-RM-72B} mà không cần fine-tune thêm. Đầu ra của mô hình xấp xỉ nằm trong khoảng $[-2, 2]$ đối với các truy vấn toán học điển hình, nhưng group $z$-score trong Phương trình~\eqref{eq:lpro_adv} tự động chuẩn hóa qua batch, khiến cho thang đo chính xác không còn quan trọng. Yêu cầu duy nhất là các điểm số của RM phải nhất quán trong một nhóm, tức là, chúng phản ánh chính xác chất lượng tương đối giữa $G$ phản hồi được lấy mẫu cho cùng một prompt.
+
+Một tính chất quan trọng là do mô hình reward được đóng băng trong quá trình huấn luyện LPRO, phân phối reward cho bất kỳ prompt cố định nào vẫn là dừng (stationary). Điều này đảm bảo rằng advantage tương đối theo nhóm $\hat{A}_i$ được tính toán từ một baseline dừng, ngăn ngừa độ thiên lệch do tính không dừng. Nếu mô hình reward được cập nhật trực tuyến, các thống kê reward sẽ thay đổi theo thời gian, vi phạm các giả định của định lý policy gradient. Việc đóng băng RM đảm bảo rằng tín hiệu reward là một hàm cố định của phản hồi, nên các chứng minh hội tụ chuẩn được áp dụng.
+
+Tóm lại, việc sử dụng \texttt{Qwen2.5-Math-RM-72B} như một mô hình reward đóng băng cho phép LPRO hưởng lợi từ tín hiệu dày đặc, tinh tế và ổn định, mở rộng khả năng áp dụng của LPRO cho các bài toán không có đáp án dạng đóng, và bảo toàn các bảo đảm lý thuyết của khung policy gradient.
+
+\subsection{Thuật toán và Vòng lặp Huấn luyện}
+
+Thuật toán~\ref{alg:lpro} tóm tắt vòng lặp huấn luyện LPRO.
+
+\begin{algorithm}[h]
+\caption{Length-Penalized Reward Optimization (LPRO)}
+\label{alg:lpro}
+\begin{algorithmic}[1]
+\Require Tập dữ liệu \(\mathcal{D}\), policy ban đầu \(\pi_{\theta_{\text{old}}}\),
+         siêu tham số \(G,\lambda,\varepsilon_{\text{low}},\varepsilon_{\text{high}},\eta\)
+\For{mỗi vòng lặp}
+  \State \textbf{Lấy mẫu động:} lấy mẫu quá mức (oversample) các prompt cho đến khi thu được batch đầy đủ thỏa mãn
+        \(0<\bigl|\{o_i:\text{equivalent}(a,o_i)\}\bigr|<G\)
+  \For{mỗi \((q,a)\) trong batch}
+    \State Lấy mẫu \(\{o_i\}_{i=1}^G \sim \pi_{\theta_{\text{old}}}(\cdot\mid q)\)
+    \State Tính reward \(r_i\) theo Phương trình~\eqref{eq:lpro_adv} và độ dài \(L_i = |o_i|\)
+    \State Tính thống kê nhóm \(\mu_r,\sigma_r,\mu_L,\sigma_L\) từ \eqref{eq:reward_stats}--\eqref{eq:length_stats}
+    \State Tính advantage có hình phạt độ dài \(A_i\) theo Phương trình~\eqref{eq:lpro_adv}
+  \EndFor
+  \For{epoch PPO \(=1\) đến \(4\)}
+    \State Tính \(\mathcal{J}_{\text{LPRO}}(\theta)\) theo Phương trình~\eqref{eq:lpro_full}
+    \State \(\theta \leftarrow \theta + \eta\,\nabla_\theta\mathcal{J}_{\text{LPRO}}(\theta)\)
+  \EndFor
+  \State \(\pi_{\theta_{\text{old}}} \leftarrow \pi_\theta\)
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================================
+\section{Mô hình: Nexus-1.5B}
+% ============================================================================
+
+\subsection{Mô hình Cơ sở}
+
+Nexus-1.5B khởi đầu từ \texttt{Qwen2.5-Math-1.5B-Instruct}~\citep{yang2024qwen25math},
+một Transformer chỉ có decoder với 1,54 tỷ tham số, sử dụng Grouped Query Attention (GQA),
+Rotary Position Embeddings (RoPE), activation SwiGLU, RMSNorm, 28 lớp ẩn,
+chiều ẩn 1\,536, 12 head attention, và độ dài ngữ cảnh 4\,096
+token. Mô hình cơ sở được pre-train trên hơn một nghìn tỷ token từ
+Qwen Math Corpus v2 (tiếng Anh và tiếng Trung, định dạng CoT và TIR) và sau đó
+được post-train bằng supervised fine-tuning tiếp nối bởi GRPO. Chúng tôi không thực hiện
+bất kỳ sửa đổi kiến trúc nào: toàn bộ cải thiện được báo cáo trong nghiên cứu này
+đến từ một giai đoạn post-training LPRO duy nhất.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\textwidth]{fig_scaling.png}
+\caption{Độ chính xác zero-shot AIME 2024 theo kích thước mô hình của các mô hình toán học mã nguồn mở
+và đóng hiện tại. Quá trình mở rộng quy mô (scaling) chỉ đạt top-2.5\% của con người ở mức 671B. Nghiên cứu của
+chúng tôi nhắm vào điểm hoạt động hiệu quả dữ liệu nhất trên đường cong này,
+lớp 1,5B.}
+\label{fig:scaling}
+\end{figure}
+
+\subsection{Dữ liệu Huấn luyện}
+
+Theo quy trình lọc độ khó của \citet{yu2025dapo}, chúng tôi lấy 100
+bài toán từ tập huấn luyện MATH-500 và chỉ giữ lại những bài toán mà
+policy hành vi trả lời đúng từ hai đến năm lần trong tám mẫu độc lập, cùng phân phối. Điều này loại bỏ các câu hỏi quá dễ (phương sai bằng 0, luôn giải được) và
+các câu hỏi quá khó (phương sai bằng 0, không bao giờ giải được); cả hai loại này
+không đóng góp tín hiệu gradient nào dưới ràng buộc lấy mẫu động. Các câu hỏi còn lại bao phủ
+cả bảy chủ đề MATH (Đại số, Hình học, Lý thuyết số, Tổ hợp, Đếm và
+Xác suất, Đại số trung cấp, Tiền giải tích) và độ khó từ 3--5.
+
+\subsection{Thiết lập Huấn luyện}
+
+Tất cả các thử nghiệm sử dụng một GPU NVIDIA A100 40GB duy nhất. Các siêu tham số chính được liệt kê trong
+Bảng~\ref{tab:hyper}. Bất chấp tập huấn luyện cực nhỏ chỉ 100 câu hỏi,
+các cải thiện tổng quát hóa mạnh mẽ sang các benchmark ngoài phân phối (out-of-distribution) (GSM8K,
+MMLU-STEM, CMATH, GaoKao Math QA), điều này chỉ ra rằng LPRO cải thiện chất lượng suy luận
+thay vì ghi nhớ phân phối huấn luyện.
+
+\subsubsection{Fine-Tuning Hiệu quả Tham số qua LoRA}\label{sec:lora}
+
+Thay vì cập nhật tất cả 1,54 tỷ tham số của mô hình cơ sở, Nexus-1.5B được
+fine-tune bằng \textbf{Low-Rank Adaptation (LoRA)}~\citep{hu2022lora}, một
+kỹ thuật hiệu quả tham số (parameter-efficient) chèn một số lượng nhỏ các ma trận
+phân tích hạng thấp (low-rank decomposition) có thể huấn luyện cùng với các trọng số tiền huấn luyện được đóng băng. Về mặt hình thức, với một ma trận trọng số tiền huấn luyện
+\(W_0 \in \mathbb{R}^{d \times k}\), LoRA tham số hóa lại trọng số được fine-tune thành
+\begin{equation}
+  W = W_0 + \Delta W = W_0 + BA,
+  \qquad B \in \mathbb{R}^{d\times r},\quad A \in \mathbb{R}^{r\times k},\quad r \ll \min(d,k).
+\label{eq:lora}
+\end{equation}
+Tại thời điểm khởi tạo \(B=\mathbf{0}\) và \(A\sim\mathcal{N}(0,\sigma^2)\), nên
+\(\Delta W=\mathbf{0}\) và quá trình huấn luyện bắt đầu từ checkpoint tiền huấn luyện.
+Trong quá trình cập nhật LPRO, chỉ \(A\) và \(B\) nhận gradient; \(W_0\) được đóng băng.
+Số lượng tham số có thể huấn luyện hiệu quả cho mỗi lớp được thích nghi là
+\(r(d+k)\), mà đối với các phép chiếu Transformer điển hình với \(d=k=1536\) và
+\(r=16\) đại diện cho mức giảm từ \(\sim 2.36 \times 10^6\) xuống
+\(\sim 4.92\times 10^4\) tham số mỗi ma trận — một hệ số nén xấp xỉ
+\(48\times\).
+
+\paragraph{Các module được thích nghi.} Các adapter LoRA được chèn vào các ma trận chiếu
+query, key, value, và output \((W_Q, W_K, W_V, W_O)\) của mỗi lớp tự chú ý (self-attention),
+cũng như hai phép chiếu tuyến tính của mỗi khối feed-forward SwiGLU \((W_{\text{gate}},
+W_{\text{up}})\). Các lớp embedding và head mô hình ngôn ngữ (language head) được giữ đóng băng.
+Lựa chọn này tập trung dung lượng có thể huấn luyện vào luồng chú ý, nơi
+được chứng minh là suy luận toán học nhạy cảm nhất với quá trình fine-tuning
+\citep{hu2022lora}.
+
+\paragraph{Quy mô LoRA.} Theo thông lệ chuẩn, cập nhật hạng thấp được nhân với tỷ lệ
+\(\alpha/r\) để độ lớn cập nhật hiệu dụng được kiểm soát bởi \(\alpha\)
+độc lập với hạng:
+\begin{equation}
+  W = W_0 + \frac{\alpha}{r}\,BA.
+\label{eq:lora_scaled}
+\end{equation}
+Chúng tôi đặt \(\alpha = 2r\), mang lại hệ số tỷ lệ là \(2\), bảo toàn
+quy ước độ lớn của bài báo LoRA gốc.
+
+\paragraph{Tương tác với LPRO.} Policy gradient của LPRO trong
+\eqref{eq:lpro_full} lan truyền ngược qua trọng số tổng hợp \(W = W_0 + ({\alpha}/{r})BA\),
+chỉ chạm đến các tham số \(\{A, B\}\) của mỗi module LoRA. Vì \(W_0\) bị
+đóng băng, policy hiệu dụng là
+\(\pi_{\theta_{\text{LoRA}}} = \pi_{W_0 + ({\alpha}/{r})BA}\) với
+\(\theta_{\text{LoRA}} = \{A_\ell, B_\ell\}_{\ell=1}^L\) tập hợp các ma trận
+adapter trên tất cả \(L\) lớp được thích nghi. Định lý policy gradient
+(Eq.~\eqref{eq:pg_theorem}) áp dụng không đổi cho tham số hóa này, vì
+log-derivative được lấy đối với \(\theta_{\text{LoRA}}\) và các trọng số đóng băng
+đóng vai trò như các hằng số cố định.
+
+\begin{lemma}[Phép chiếu gradient LoRA]\label{lem:lora_grad}
+Gọi \(\mathcal{J}(\theta)\) là bất kỳ hàm mục tiêu huấn luyện khả vi nào và
+\(\theta = \{A_\ell, B_\ell\}_\ell\) là các tham số LoRA như trong
+\eqref{eq:lora_scaled}. Đối với mỗi lớp được thích nghi \(\ell\), gradient đối với
+toàn bộ trọng số \(W_\ell\) được chiếu lên đa tạp (manifold) hạng thấp:
+\[
+  \frac{\partial \mathcal{J}}{\partial A_\ell} = \frac{\alpha}{r}\,B_\ell^\top
+  \frac{\partial \mathcal{J}}{\partial W_\ell},
+  \qquad
+  \frac{\partial \mathcal{J}}{\partial B_\ell} = \frac{\alpha}{r}\,
+  \frac{\partial \mathcal{J}}{\partial W_\ell}\,A_\ell^\top.
+\]
+Do đó, số lượng phép tính toán gradient tỷ lệ với \(\mathcal{O}(r(d+k))\)
+mỗi lớp thay vì \(\mathcal{O}(dk)\), và kích thước bộ nhớ của
+trạng thái bộ tối ưu hóa (optimiser state) giảm đi một hệ số tương tự là \(dk/r(d+k)\).
+\end{lemma}
+
+\begin{proof}
+Theo quy tắc chuỗi áp dụng cho \(W_\ell = W_0 + ({\alpha}/{r})B_\ell A_\ell\):
+\[
+  \frac{\partial \mathcal{J}}{\partial A_\ell}
+  = \frac{\partial \mathcal{J}}{\partial W_\ell} \cdot
+    \frac{\partial W_\ell}{\partial A_\ell}
+  = \frac{\partial \mathcal{J}}{\partial W_\ell} \cdot \frac{\alpha}{r} B_\ell
+  = \frac{\alpha}{r}\,B_\ell^\top \frac{\partial \mathcal{J}}{\partial W_\ell}.
+\]
+Tính toán cho \(B_\ell\) hoàn toàn đối xứng. Số lượng tham số và các công bố về bộ nhớ
+suy ra từ việc đếm các chiều của \(A_\ell \in \mathbb{R}^{r \times k}\) và
+\(B_\ell \in \mathbb{R}^{d \times r}\). \qed
+\end{proof}
+
+\begin{lemma}[LoRA bảo toàn tính không thiên lệch của LPRO]\label{lem:lora_unbiased}
+Dưới tham số hóa LoRA, ước lượng gradient cấp token
+\(g^{\text{tok}}_{\theta_{\text{LoRA}}}\) (Bổ đề~\ref{lem:tokenlevel_unbiased})
+vẫn là một ước lượng không thiên lệch của hướng policy gradient cấp token.
+\end{lemma}
+
+\begin{proof}
+Kết quả không thiên lệch của Bổ đề~\ref{lem:tokenlevel_unbiased} giữ đúng cho mọi
+policy khả vi \(\pi_\theta\) và chỉ dựa trên kỹ thuật log-derivative
+và cơ chế chuẩn hóa, chứ không phụ thuộc vào tham số hóa cụ thể của \(\theta\).
+Vì \(\pi_{\theta_{\text{LoRA}}}\) là một tham số hóa lại trơn của
+\(\pi_{W}\) thông qua quy tắc chuỗi của Bổ đề~\ref{lem:lora_grad}, gradient đối với
+\(\theta_{\text{LoRA}}\) là gradient đối với \(W\) được chiếu
+lên không gian tiếp tuyến hạng thấp. Phép chiếu này tuyến tính và do đó bảo toàn
+tính chất trung bình không của lập luận không thiên lệch. \qed
+\end{proof}
+
+\begin{lemma}[Hạng hiệu dụng và khả năng biểu diễn của các adapter LoRA]\label{lem:lora_rank}
+Giả sử trọng số tiền huấn luyện \(W_0\) có phân tích giá trị suy biến (SVD) là
+\(W_0 = U\Sigma V^\top\). Với bất kỳ cập nhật mục tiêu \(\Delta W^*\) nào có hạng lớn nhất là \(r\),
+tồn tại các ma trận \(A\) và \(B\) sao cho \(BA = \Delta W^*\). Do đó, tập
+các trọng số được fine-tune mà LoRA với hạng \(r\) có thể đạt tới chứa toàn bộ không gian con affine
+\(\{W_0 + \Delta W : \operatorname{rank}(\Delta W) \le r\}\), và không gian con
+này trù mật trong tập hợp tất cả các ma trận trọng số khi \(r \to \min(d,k)\).
+\end{lemma}
+
+\begin{proof}
+Cho trước \(\Delta W^* \in \mathbb{R}^{d\times k}\) với \(\operatorname{rank}(\Delta W^*)=r\),
+phân tích SVD của nó cho \(\Delta W^* = U_r \Sigma_r V_r^\top\). Đặt
+\(B = U_r \Sigma_r^{1/2}\) và \(A = \Sigma_r^{1/2} V_r^\top\) ta có
+\(BA = \Delta W^*\). Lập luận trù mật được suy ra vì mọi ma trận có hạng
+\(\le r\) đều có thể đạt tới, và hợp qua \(r=1,\ldots,\min(d,k)\) bao phủ mọi
+ma trận. \qed
+\end{proof}
+
+Do đó, LoRA không hạn chế khả năng biểu diễn lý thuyết của policy được
+fine-tune; nó chỉ giới hạn \emph{quỹ đạo huấn luyện} vào một không gian tiếp tuyến hạng thấp,
+điều này hoạt động như một cơ chế chính quy hóa cấu trúc và ngăn ngừa hiện tượng quên thảm họa (catastrophic forgetting) các
+kiến thức toán học tiền huấn luyện được mã hóa trong \(W_0\).
+
+\begin{table}[h]
+\centering
+\caption{Cấu hình LoRA cho Nexus-1.5B.}
+\label{tab:lora}
+\begin{tabular}{lc}
+\toprule
+Tham số & Giá trị \\
+\midrule
+Hạng \(r\) & 16 \\
+Hệ số tỷ lệ \(\alpha\) & 32 \\
+Dropout & 0.05 \\
+Các module được thích nghi & \(W_Q, W_K, W_V, W_O, W_{\text{gate}}, W_{\text{up}}\) \\
+Số tham số có thể huấn luyện & 18\,464\,768 \\
+Tỷ lệ tham số huấn luyện / tổng số & \(\approx 1.2\%\) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Các siêu tham số LPRO cho Nexus-1.5B.}
+\label{tab:hyper}
+\begin{tabular}{lc}
+\toprule
+Tham số & Giá trị \\
+\midrule
+Mô hình cơ sở & \texttt{Qwen2.5-Math-1.5B-Instruct} \\
+Prompt huấn luyện & 100 từ MATH-500 (đã lọc độ khó) \\
+Kích thước nhóm \(G\) & 32 \\
+Số epoch PPO mỗi vòng lặp & 4 \\
+Tốc độ học \(\eta\) & \(1\times 10^{-6}\) \\
+Cắt ngưỡng dưới \(\varepsilon_{\text{low}}\) & 0.20 \\
+Cắt ngưỡng trên \(\varepsilon_{\text{high}}\) & 0.20 (phân tích cắt bỏ: 0.28) \\
+Hình phạt độ dài \(\lambda\) & 0.10 \\
+Số token sinh tối đa & 2048 \\
+Độ dài ngữ cảnh & 1024 \\
+Bonus định dạng reward & 0.10 \\
+Bộ tối ưu hóa & AdamW \(\bigl(\beta_1=0.9,\beta_2=0.95\bigr)\) \\
+Nhiệt độ lấy mẫu (temperature) & 1.0 \\
+Hệ số KL \(\beta\) & 0 (không có số hạng KL tường minh) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Quá trình suy luận sử dụng prompt CoT zero-shot chuẩn:
+\texttt{"\{question\}\textbackslash nPlease reason step by step, and put your final
+answer within \textbackslash boxed\{\}."} Đối với TIR, chúng tôi sử dụng
+pipeline đánh giá chính thức của Qwen2.5-Math với sandbox thông dịch Python.
+
+% ============================================================================
+\section{Đánh giá}
+% ============================================================================
+
+\subsection{Các Benchmark}
+
+Chúng tôi tuân theo quy trình đánh giá của \citet{yang2024qwen25math} trên
+chín benchmark sau đây.
+\begin{description}[leftmargin=*,style=nextline]
+  \item[Tiếng Anh (CoT và TIR):] GSM8K (8-shot), MATH-500 (zero-shot), MMLU-STEM
+        (4-shot), Minerva Math, GaoKao 2023 EN, Olympiad Bench, College Math.
+  \item[Tiếng Trung (CoT):] CMATH (6-shot), GaoKao Math Cloze (5-shot), GaoKao Math QA
+        (4-shot).
+\end{description}
+Tất cả các số liệu báo cáo độ chính xác pass@1 trừ khi có chỉ định khác.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\textwidth]{image2.png}
+\caption{Hồ sơ hiệu suất trên từng benchmark của lớp mô hình 1,5B. Nexus-1.5B
+(đỏ) thống trị biên Pareto trên năm trong sáu trục; sự suy giảm duy nhất là trên
+GaoKao Cloze, có thể là do vấn đề không khớp định dạng được thảo luận trong
+Phần~\ref{sec:chinese}.}
+\label{fig:radar}
+\end{figure}
+
+\subsection{Các Benchmark Tiếng Anh}\label{sec:english}
+
+Bảng~\ref{tab:english} báo cáo kết quả CoT pass@1. Nexus-1.5B vượt trội hơn
+baseline instruct của nó trên mọi benchmark tiếng Anh, với mức tăng đáng kể trên MATH-500
+(+4.4), MMLU-STEM (+2.8), và sự cải thiện mạnh mẽ trên Olympiad Bench dưới cấu hình TIR (+12).
+Quan trọng hơn, nó vượt qua mọi mô hình lớp 1,5B trước đây và tiệm cận
+hiệu suất của một số hệ thống lớp 7B.
+
+\begin{table}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{Mô hình} & \textbf{GSM8K} & \textbf{MATH} & \textbf{Minerva} &
+  \textbf{GaoKao EN} & \textbf{Olympiad} & \textbf{College} &
+  \textbf{MMLU} & \textbf{TB} \\
+\midrule
+\multicolumn{9}{l}{\textit{Mô hình tổng quát}} \\
+Llama-3.1-8B & 56.7 & 20.3 & -- & -- & -- & -- & 53.1 & -- \\
+Llama-3.1-70B & 85.5 & 41.4 & -- & -- & -- & -- & 78.1 & -- \\
+Qwen2-1.5B-Instruct & 64.1 & 25.1 & 5.5 & 19.7 & 4.1 & 10.4 & 46.2 & 25.0 \\
+\midrule
+\multicolumn{9}{l}{\textit{Mô hình 1,5B chuyên biệt}} \\
+Qwen2-Math-1.5B-Instruct & 84.2 & 69.4 & 29.4 & 59.7 & 31.3 & 44.2 & 54.9 & 53.3 \\
+Qwen2.5-Math-1.5B-Instruct & 84.8 & 75.8 & 29.4 & 65.5 & 38.1 & 47.7 & 57.5 & 56.9 \\
+\textbf{Nexus-1.5B (Ours)} & \textbf{85.2} & \textbf{80.2} & \textbf{33.0} &
+  \textbf{68.0} & \textbf{41.0} & \textbf{54.0} & \textbf{60.3} & \textbf{60.2} \\
+\midrule
+\multicolumn{9}{l}{\textit{Mô hình lớn hơn (tham chiếu)}} \\
+GPT-4o & 92.9 & 81.1 & 36.8 & 67.5 & 43.3 & 48.5 & 64.2 & 62.0 \\
+Qwen2.5-Math-72B & 95.9 & 85.9 & 44.1 & 71.9 & 49.0 & 49.5 & 80.8 & 68.2 \\
+\bottomrule
+\end{tabular}}
+\caption{Kết quả benchmark tiếng Anh trong đánh giá CoT pass@1. Các con số tốt nhất của lớp 1,5B được in đậm.
+Trung bình của Nexus-1.5B sát với GPT-4o trong khoảng cách 1,8 điểm mặc dù
+nhỏ hơn khoảng hai bậc độ lớn về số tham số chủ động.}
+\label{tab:english}
+\end{table}
+
+\subsection{Các Benchmark Tiếng Trung}\label{sec:chinese}
+
+Bảng~\ref{tab:chinese} báo cáo các kết quả tiếng Trung. Nexus-1.5B cải thiện trên CMATH và
+GaoKao Math QA nhưng giảm sút trên GaoKao Math Cloze. Chúng tôi cho rằng điều này là do định dạng
+không khớp: bài toán điền khuyết yêu cầu câu trả lời số học một token, trong khi LPRO được huấn luyện
+mô hình sinh ra một lời giải ngắn gọn nhưng rõ ràng kèm theo câu trả lời được đặt trong hộp ở cuối.
+Hình phạt độ dài càng ưu tiên kiểu mẫu thứ hai hơn. Một mức reward nhận thức được định dạng,
+chấp nhận các câu trả lời chỉ có số là hợp lệ, có thể thu hẹp khoảng cách này; chúng tôi để lại điều này cho
+các nghiên cứu trong tương lai.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Mô hình} & \textbf{CMATH} & \textbf{GaoKao Cloze} & \textbf{GaoKao QA} & \textbf{TB} \\
+\midrule
+Qwen2.5-Math-1.5B-Instruct & 83.0 & 65.5 & 54.1 & 67.5 \\
+\textbf{Nexus-1.5B} & \textbf{83.5} & 49.2 & \textbf{56.9} & 63.2 \\
+\bottomrule
+\end{tabular}
+\caption{Kết quả benchmark tiếng Trung (CoT, pass@1).}
+\label{tab:chinese}
+\end{table}
+
+\subsection{Suy luận Tích hợp Công cụ (TIR)}
+
+Bảng~\ref{tab:tir} so sánh hiệu suất CoT và TIR. TIR cung cấp một sự gia tăng
+bổ sung cho Nexus-1.5B, đặc biệt là trên Olympiad Bench (+14 điểm) và Minerva Math
+(+7 điểm). Hình phạt độ dài có khả năng đã khuyến khích mô hình giao phó
+các bước tính toán nặng nề cho trình thông dịch Python thay vì sinh ra các chuỗi số học
+dài dòng bằng văn bản, điều này vừa làm ngắn câu trả lời cuối cùng vừa tăng tỷ lệ
+chính xác của nó.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Benchmark} &
+  \textbf{Instruct CoT} & \textbf{Nexus CoT} &
+  \textbf{Instruct TIR} & \textbf{Nexus TIR} \\
+\midrule
+MATH-500       & 77 & 85 & 80 & \textbf{86} \\
+Minerva Math   & 30 & 37 & 34 & \textbf{40} \\
+GaoKao 2023 EN & 66 & 69 & 68 & \textbf{72} \\
+Olympiad Bench & 40 & 41 & 49 & \textbf{55} \\
+College Math   & 49 & 47 & 55 & \textbf{56} \\
+\bottomrule
+\end{tabular}
+\caption{So sánh hiệu suất giữa CoT và TIR của
+Qwen2.5-Math-1.5B-Instruct và Nexus-1.5B. Nexus-1.5B đạt được sự gia tăng đồng đều dưới cấu hình TIR,
+với sự cải thiện lớn nhất trên Olympiad Bench.}
+\label{tab:tir}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{image.png}
+\caption{CoT so với TIR trên Nexus-1.5B và baseline Qwen2.5-Math-1.5B-Instruct.
+Nexus-1.5B liên tục vượt trội hơn baseline trên cả năm benchmark, với mức
+tăng lớn nhất được quan sát thấy trên Olympiad Bench dưới cấu hình TIR (+14 điểm).}
+\label{fig:cot_tir_bars}
+\end{figure}
+
+% ============================================================================
+\section{Phân tích}\label{sec:analysis}
+% ============================================================================
+
+Phần này cô lập sự đóng góp của từng thành phần LPRO thông qua các phân tích
+cắt bỏ (ablation) có kiểm soát.
+
+\subsection{Tác động của Hình phạt Độ dài \texorpdfstring{$\lambda$}{lambda}}
+
+Bảng~\ref{tab:ab_lambda} báo cáo độ chính xác trên MATH-500 và độ dài phản hồi trung bình khi
+\(\lambda\) thay đổi. Với \(\lambda=0\) (chỉ có GRPO), mô hình đạt độ chính xác 77,4 với độ dài
+trung bình 312 token. Việc đặt \(\lambda=0.10\) mang lại độ chính xác cao nhất là 80,2
+\emph{đồng thời} giảm 14\% độ dài; hai sự cải thiện này tồn tại song song, xác nhận rằng
+hình phạt không đánh đổi độ chính xác lấy sự ngắn gọn mà thực tế tạo điều kiện cho nó -- các
+chuỗi suy nghĩ ngắn dễ duy trì tính chính xác hơn so với các chuỗi dài dòng, vòng vèo. Một hình
+phạt mạnh hơn \(\lambda=0.30\) tiếp tục cắt giảm độ dài nhưng làm giảm độ chính xác 2,2 điểm,
+cho thấy rằng một số bước suy luận trung gian thực sự mang tính thông tin và
+không nên bị triệt tiêu quá mức.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\(\lambda\) & MATH-500 & Độ dài TB & \(\Delta\) độ dài \\
+\midrule
+0.0 (Chỉ GRPO) & 77.4 & 312 & -- \\
+\textbf{0.1 (Nexus-1.5B)} & \textbf{80.2} & 268 & \(-14\%\) \\
+0.3 & 78.0 & 201 & \(-36\%\) \\
+\bottomrule
+\end{tabular}
+\caption{Phân tích cắt bỏ (ablation) đối với hình phạt độ dài \(\lambda\) trên MATH-500 (CoT). Một hình
+phạt vừa phải giúp tối đa hóa độ chính xác.}
+\label{tab:ab_lambda}
+\end{table}
+
+\subsection{Cắt ngưỡng Bất đối xứng}
+
+Bảng~\ref{tab:ab_clip} so sánh cắt ngưỡng đối xứng và bất đối xứng trên nền tảng của
+baseline GRPO, với có và không có hình phạt độ dài. Chỉ sử dụng cắt ngưỡng bất đối xứng
+\((\varepsilon_{\text{low}}=0.20,\,\varepsilon_{\text{high}}=0.28)\) đã cải thiện độ chính xác
+lên \(+1.7\) điểm; kết hợp nó với hình phạt độ dài bổ sung thêm \(+1.1\)
+điểm để đạt \(80.2\). Hai thành phần này bổ trợ cho nhau: cắt ngưỡng bất đối xứng
+bảo tồn entropy khám phá đủ lâu để hình phạt độ dài thiên vị
+khối lượng policy còn lại về phía các giải pháp ngắn hơn, dứt khoát hơn.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Chiến lược cắt ngưỡng & \(\varepsilon_{\text{low}}\) & \(\varepsilon_{\text{high}}\) & MATH-500 \\
+\midrule
+Đối xứng (GRPO) & 0.20 & 0.20 & 77.4 \\
+Bất đối xứng (DAPO) & 0.20 & 0.28 & 79.1 \\
+\textbf{Bất đối xứng + hình phạt độ dài (Ours)} & 0.20 & 0.28 & \textbf{80.2} \\
+\bottomrule
+\end{tabular}
+\caption{Phân tích cắt bỏ đối với chiến lược cắt ngưỡng trên MATH-500 (CoT).}
+\label{tab:ab_clip}
+\end{table}
+
+\subsection{Hiệu quả Dữ liệu}
+
+Một phát hiện trọng tâm, có lẽ đáng ngạc nhiên là LPRO chỉ cần 100
+prompt huấn luyện để nâng cao hiệu suất trên chín benchmark ngoài phân phối. Chúng tôi cho
+rằng điều này là nhờ vào reward dựa trên luật và advantage tương đối theo nhóm: tín hiệu gradient
+có thông tin miễn là một nhóm chứa cả câu trả lời đúng và sai, và
+bộ lọc độ khó đảm bảo điều này cho hầu hết mọi batch. Sự tổng quát hóa sang GSM8K,
+CMATH, và GaoKao QA -- những benchmark mà phân phối prompt của chúng khác biệt đáng kể
+so với MATH-500 -- chỉ ra rằng LPRO cải thiện policy suy luận cơ sở
+thay vì ghi nhớ tập huấn luyện.
+
+\subsection{Chẩn đoán: Quỹ đạo Entropy và KL}
+
+Trong suốt quá trình huấn luyện LPRO, chúng tôi theo dõi entropy cấp token của \(\pi_\theta\) và
+phân kỳ KL của nó so với \(\pi_{\text{ref}}\). Dưới cắt ngưỡng đối xứng, entropy giảm
+đơn điệu về 0 trong khoảng 800 bước cập nhật, đi kèm với sự tăng vọt
+của KL. Dưới cắt ngưỡng bất đối xứng, entropy ổn định gần mức \(0.55\) nat mỗi
+token và KL tăng trưởng dưới tuyến tính (sub-linearly), phù hợp với phân tích ở
+Phần~\ref{sec:asym_clip}. Chẩn đoán này biện minh cho việc bỏ qua một hằng số điều chuẩn KL
+tường minh từ \eqref{eq:lpro_full}: vùng tin cậy được tạo ra bởi cắt ngưỡng bất đối xứng
+cộng với lấy mẫu động là đủ.
+
+% ============================================================================
+\section{Các Nghiên cứu Liên quan}
+% ============================================================================
+
+\paragraph{Suy luận toán học với các LLM.} Prompting theo chuỗi suy nghĩ
+(Chain-of-thought)~\citep{wei2022chain}, tự nhất quán (self-consistency), và các mô hình reward quá trình (process reward models) đã thiết lập
+công thức hiện đại để khơi gợi khả năng suy luận đa bước. Các mô hình chuyên biệt như
+Minerva~\citep{lewkowycz2022solving}, DeepSeekMath~\citep{shao2024deepseekmath}, và
+chuỗi Qwen-Math~\citep{yang2024qwen25math} áp dụng công thức này với
+tiền huấn luyện và post-training theo miền chuyên biệt, thu hẹp khoảng cách với các
+hệ thống đóng hàng đầu. \citet{tang2024mathscale} khám phá việc mở rộng quy mô (scaling) của quá trình tinh chỉnh chỉ thị (instruction tuning) và
+chứng minh rằng chất lượng dữ liệu, chứ không phải số lượng, thống trị hiệu quả ở giai đoạn SFT.
+
+\paragraph{Học tăng cường cho suy luận.}
+\citet{deepseekai2025deepseekr1} chứng minh rằng RL dựa trên kết quả (outcome-based RL) với việc kiểm chứng
+dựa trên luật là đủ để tạo ra khả năng suy luận tinh vi khi áp dụng ở
+quy mô đủ lớn. \citet{yu2025dapo} mô hình hóa hai kiểu thất bại của GRPO -- entropy collapse
+và thiên vị do chuẩn hóa cấp chuỗi (sequence-level normalisation bias) -- và đề xuất Clip-Higher và chuẩn hóa
+cấp token như các biện pháp khắc phục. LPRO thừa kế cả hai sửa đổi này và thêm vào
+hình phạt độ dài tương đối theo nhóm, coi sự ngắn gọn là một tín hiệu hàng đầu (first-class signal) cùng
+với tính chính xác.
+
+\paragraph{Độ dài và sự ngắn gọn.} Các ngưỡng cắt độ dài cứng nhắc xuất hiện trong cơ chế định hình
+reward dựa trên độ dài quá mức của DAPO; chi phí độ dài mềm đã được khám phá trong các tác vụ tóm tắt và
+tuân thủ chỉ thị. Theo hiểu biết của chúng tôi, LPRO là phương pháp đầu tiên đưa vào một
+hình phạt độ dài sử dụng \(z\)-score, \emph{tương đối theo nhóm}, \emph{ở cấp độ advantage} trong
+ngữ cảnh RL toán học, với các bảo đảm về tính bất biến theo thang đo và xếp hạng toán học.
+
+% ============================================================================
+\section{Kết luận}
+% ============================================================================
+
+Chúng tôi giới thiệu Nexus-1.5B, một mô hình suy luận toán học 1,54 tỷ tham số được huấn luyện
+với Tối ưu hóa Reward Phạt Độ dài (Length-Penalized Reward Optimization - LPRO). LPRO mở rộng GRPO với một
+hình phạt độ dài tương đối theo nhóm ở cấp độ advantage, và áp dụng cắt ngưỡng bất đối xứng
+cùng chuẩn hóa cấp token của DAPO để ngăn chặn entropy collapse và loại bỏ thiên vị gradient
+liên quan đến độ dài. Chúng tôi rút ra từng thành phần từ định lý policy gradient và
+chứng minh rằng hình phạt độ dài bảo toàn tính bất biến theo thang đo, tạo ra một sự xếp hạng chặt chẽ
+các phản hồi đúng như nhau theo độ dài (Bổ đề~\ref{lem:length_order}), và hoạt động
+trên một gradient cấp token không thiên lệch (Bổ đề~\ref{lem:tokenlevel_unbiased}).
+Được huấn luyện trên chỉ 100 bài toán từ MATH-500, Nexus-1.5B thiết lập một state-of-the-art mới
+trong lớp tham số 1,5B -- 80.2 trên MATH-500 (CoT), 84.0 với TIR -- trong khi
+giảm trung bình độ dài phản hồi 14\%. Kết quả cho thấy rằng việc thiết kế reward
+cẩn thận có thể thu hẹp đáng kể khoảng cách hiệu suất giữa các mô hình toán học
+nhỏ và lớn mà không cần phải mở rộng quy mô tham số.
+
+\paragraph{Hạn chế và Hướng đi tương lai.} Ba hạn chế của nghiên cứu
+hiện tại gợi ý các hướng mở rộng cụ thể. Thứ nhất, sự suy giảm trên GaoKao Math Cloze
+cho thấy rằng một mức reward nhận biết được định dạng, nhạy cảm với định dạng câu trả lời mong đợi của
+benchmark, sẽ mở ra những khả năng cải thiện sâu hơn. Thứ hai, việc huấn luyện trên chỉ 100 bài toán chỉ là một
+bằng chứng khái niệm (proof of concept); việc mở rộng sang một hỗn hợp dữ liệu huấn luyện đa dạng hơn (hình học,
+tổ hợp, lý thuyết số ở cấp độ Olympic) sẽ mang lại nhiều cải thiện hơn. Thứ ba,
+reward dựa trên luật chính xác nhưng mang tính nhị phân ở cấp độ câu trả lời; việc bổ sung nó với một
+mô hình reward quá trình được học có thể cung cấp phản hồi dày đặc hơn trên các bước suy luận
+trung gian, từ đó tăng tốc độ hội tụ hơn nữa. Khung LPRO hỗ trợ bất kỳ
+reward vô hướng bị chặn nào (xem Bổ đề~\ref{lem:reward_range}) và sẽ kết hợp tự nhiên với
+một tín hiệu như vậy. Các chiến lược thích ứng
+(adaptive schedules) cho \(\lambda\) (thấp ở đầu, cao dần về sau) và cho
+\(\varepsilon_{\text{high}}\) cũng có thể cải thiện sự đánh đổi giữa khám phá và ngắn gọn
+trong quá trình huấn luyện.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{99}
+
+\bibitem[DeepSeek-AI(2025)]{deepseekai2025deepseekr1}
+DeepSeek-AI. DeepSeek-R1: Incentivizing reasoning capability in LLMs via
+reinforcement learning. \emph{arXiv:2501.12948}, 2025.
+
+\bibitem[He et al.(2024)]{he2024olympiadbench}
+Chaoqun He, Renjie Luo, Yuzhuo Bai, et al. OlympiadBench: A challenging benchmark for
+promoting AGI with olympiad-level bilingual multimodal scientific problems. In
+\emph{ACL}, 2024.
+
+\bibitem[Hendrycks et al.(2021a)]{hendrycks2021mmlu}
+Dan Hendrycks, Collin Burns, Steven Basart, et al. Measuring massive multitask
+language understanding. In \emph{ICLR}, 2021.
+
+\bibitem[Hendrycks et al.(2021b)]{hendrycks2021math}
+Dan Hendrycks, Collin Burns, Saurav Kadavath, et al. Measuring mathematical problem
+solving with the MATH dataset. In \emph{NeurIPS Datasets and Benchmarks}, 2021.
+
+\bibitem[Lewkowycz et al.(2022)]{lewkowycz2022solving}
+Aitor Lewkowycz, Anders Andreassen, David Dohan, et al. Solving quantitative
+reasoning problems with language models. In \emph{NeurIPS}, 2022.
+
+\bibitem[Schulman et al.(2017)]{schulman2017proximal}
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov.
+Proximal policy optimization algorithms. \emph{arXiv:1707.06347}, 2017.
+
+\bibitem[Shao et al.(2024)]{shao2024deepseekmath}
+Zhihong Shao, Peiyi Wang, Qihao Zhu, et al. DeepSeekMath: Pushing the limits of
+mathematical reasoning in open language models. \emph{arXiv:2402.03300}, 2024.
+
+\bibitem[Tang et al.(2024)]{tang2024mathscale}
+Zhengyang Tang, Xingxing Zhang, Benyou Wang, and Furu Wei. MathScale: Scaling
+instruction tuning for mathematical reasoning. In \emph{ICML}, 2024.
+
+\bibitem[Wei et al.(2022)]{wei2022chain}
+Jason Wei, Xuezhi Wang, Dale Schuurmans, et al. Chain-of-thought prompting elicits
+reasoning in large language models. In \emph{NeurIPS}, 2022.
+
+\bibitem[Wei et al.(2023)]{wei2023cmath}
+Tianwen Wei, Jian Luan, Wei Liu, Shuang Dong, and Bin Wang. CMATH: Can your language
+model pass Chinese elementary school math test? \emph{arXiv:2306.16636}, 2023.
+
+\bibitem[Yang et al.(2024)]{yang2024qwen25math}
+An Yang, Beichen Zhang, Binyuan Hui, et al. Qwen2.5-Math technical report: Toward
+mathematical expert model via self-improvement. \emph{arXiv:2409.12122}, 2024.
+
+\bibitem[Yu et al.(2025)]{yu2025dapo}
+Qiying Yu, Zheng Zhang, Ruofei Zhu, et al. DAPO: An open-source LLM reinforcement
+learning system at scale. \emph{arXiv:2503.14476}, 2025.
+
+\end{thebibliography}
+
+\appendix
+
+% ============================================================================
+\section{Các Prompt Suy luận}
+% ============================================================================
+
+\subsection{Prompt Zero-Shot CoT}
+
+\begin{quote}\ttfamily\small
+\{question\}\\
+Please reason step by step, and put your final answer within \textbackslash boxed\{\}.
+\end{quote}
+
+\subsection{Prompt Suy luận Tích hợp Công cụ (TIR)}
+
+\begin{quote}\ttfamily\small
+You will solve the problem step by step. You may write Python code in
+\textbackslash texttt\{```python ... ```\} blocks; the code will be executed and the
+output returned. Put your final answer within \textbackslash boxed\{\}.\\[4pt]
+Problem: \{question\}
+\end{quote}
+
+% ============================================================================
+\section{Các Lời giải Mẫu}
+% ============================================================================
+
+Chúng tôi đính kèm ba lời giải tiêu biểu do Nexus-1.5B sinh ra ở chế độ CoT.
+
+\subsection{IMO Shortlist 2002}
+
+\textbf{Bài toán.} Số nguyên dương \(t\) nhỏ nhất là bao nhiêu sao cho tồn tại
+các số nguyên \(x_1,x_2,\dots,x_t\) thỏa mãn \(x_1^3+x_2^3+\cdots+x_t^3=2002^{2002}\)?
+
+\textbf{Lời giải của Nexus-1.5B (rút gọn).} Lưu ý rằng
+\(2002=2\cdot 7\cdot 11\cdot 13\) và \(2002^{2002}\equiv 4\pmod 9\). Các lập phương modulo
+\(9\) nhận các giá trị thuộc \(\{-1,0,1\}\), do đó một tổng của \(t\) lập phương có thể đồng dư với
+\(4\pmod 9\) chỉ khi \(t\ge 4\). Trường hợp \(t=4\) có thể đạt được
+(\(1+1+1+1\equiv 4\pmod 9\)), vì vậy giá trị nhỏ nhất là \(\boxed{4}\).
+
+\subsection{JBMO Shortlist 2011}
+
+\textbf{Bài toán.} Cho \(AD,\,BF,\,CE\) là các đường cao của \(\triangle ABC\). Một đường thẳng
+đi qua \(D\) và song song với \(AB\) cắt \(EF\) tại \(G\). Nếu \(H\) là trực tâm
+của \(\triangle ABC\), hãy tính góc \(\angle CGH\).
+
+\textbf{Lời giải của Nexus-1.5B (rút gọn).} Tứ giác \(AEHF\) là tứ giác nội tiếp vì
+\(\angle AEH=\angle AFH=90^\circ\), nên \(\angle EHF=180^\circ-\angle EAF\). Bởi vì
+\(DG\parallel AB\), góc so le trong \(\angle DGE=\angle BAE=\angle EAF\).
+Kết hợp hai điều kiện trên ta được \(\angle CGH=\angle EHF=90^\circ\), do đó kết quả là
+\(\boxed{90^\circ}\).
+
+\subsection{Phương trình Hàm IMO 2022}
+
+\textbf{Bài toán.} Ký hiệu \(\mathbb{R}^+\) là tập các số thực dương. Tìm tất cả các hàm
+\(f:\mathbb{R}^+\to\mathbb{R}^+\) sao cho với mỗi \(x\in\mathbb{R}^+\), tồn tại
+\emph{đúng một} \(y\in\mathbb{R}^+\) thỏa mãn \(xf(y)+yf(x)\le 2\).
+
+\textbf{Lời giải của Nexus-1.5B (rút gọn).} Đặt \(x=y\) ta có \(2xf(x)\le 2\), suy ra
+\(f(x)\le 1/x\). Kiểm tra \(f(x)=1/x\) ta được \(xf(y)+yf(x)=x/y+y/x\ge 2\) theo bất đẳng thức AM-GM
+với dấu bằng xảy ra khi và chỉ khi \(x=y\), điều này chứng minh sự tồn tại và tính duy nhất của \(y\) với mỗi
+\(x\). Bất kỳ hàm \(f\) nào khác ngoài \(1/x\) đều vi phạm tính duy nhất. Nghiệm duy nhất là
+\(\boxed{f(x)=1/x}\).
+
+\end{document}

@@ -83,103 +83,102 @@ st.markdown("""
 # Hàm chuyển đổi LaTeX và xử lý HTML
 def format_latex_response(text):
     """
-    Định dạng response từ model để hiển thị LaTeX đúng cách trong Streamlit
+    Định dạng response từ model để hiển thị LaTeX đúng cách trong Streamlit.
+    Pipeline xử lý:
+      1. Unescape HTML entities
+      2. Loại bỏ HTML tags
+      3. Chuẩn hoá delimiter LaTeX (\\[...\\] → $$...$$, \\(...\\) → $...$)
+      4. Sửa các lỗi LaTeX phổ biến từ model output
+      5. Xử lý \\boxed{} cho hiển thị đẹp
+      6. Định dạng các bước giải
     """
+    if not text:
+        return ""
+
     # 1. Xử lý HTML entities
     text = html.unescape(text)
-    
+
     # 2. Loại bỏ tất cả các thẻ HTML
     text = re.sub(r'<[^>]*>', '', text)
-    
-    # 3. Sửa các lỗi LaTeX phổ biến
-    # Sửa lỗi: \frac -> frac
-    text = re.sub(r'\{frac', r'\\frac', text)
-    # Sửa lỗi: boxed{ -> \boxed{
-    text = re.sub(r'(?<!\\)boxed\{', r'\\boxed{', text)
-    # Sửa lỗi: $$$boxed -> \boxed
-    text = re.sub(r'\$\$\$boxed\{', r'\\boxed{', text)
-    # Sửa lỗi: $boxed -> \boxed
-    text = re.sub(r'\$boxed\{', r'\\boxed{', text)
-    # Sửa lỗi: \boxed{...}$[3] -> \boxed{...}
-    text = re.sub(r'(\\)?boxed\{[^}]*\}\$?\[.*?\]', lambda m: f'\\boxed{{{extract_boxed_content(m.group(0))}}}', text)
-    
-    # 4. Xử lý LaTeX display: \[ ... \] -> $$ ... $$
-    text = re.sub(r'\\\[\s*(.*?)\s*\\\]', r'$$\1$$', text, flags=re.DOTALL)
-    
-    # 5. Xử lý LaTeX inline: \( ... \) -> $ ... $
-    text = re.sub(r'\\\(\s*(.*?)\s*\\\)', r'$\1$', text, flags=re.DOTALL)
-    
-    # 6. Xử lý \boxed{...} đặc biệt
+
+    # 3. Chuẩn hoá delimiter LaTeX
+    # \[ ... \] → $$ ... $$
+    text = re.sub(r'\\\[(.+?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+    # \( ... \) → $ ... $
+    text = re.sub(r'\\\((.+?)\\\)', r'$\1$', text, flags=re.DOTALL)
+
+    # 4. Sửa các lỗi LaTeX phổ biến từ model
+    # 4a. "boxed{" không có backslash → "\boxed{"
+    text = re.sub(r'(?<!\\)\bboxed\{', r'\\boxed{', text)
+    # 4b. "$boxed{" hoặc "$$boxed{" → bỏ $ thừa, thêm \boxed
+    text = re.sub(r'\${1,3}boxed\{', r'\\boxed{', text)
+    # 4c. Loại bỏ trailing reference như $[3] sau boxed
+    text = re.sub(r'(\\boxed\{[^}]*\})\$?\[\d+\]', r'\1', text)
+
+    # 5. Tách \boxed{...} ra khỏi $ hoặc $$ wrapper trước khi xử lý
+    # $\boxed{...}$ → \boxed{...}   (bỏ inline math wrapper)
+    # $$\boxed{...}$$ → \boxed{...} (bỏ display math wrapper)
+    boxed_inner = r'\\boxed\{(?:[^{}]|\{[^{}]*\})*\}'
+    text = re.sub(r'\${1,2}(' + boxed_inner + r')\${1,2}[.,;:!?\s]*', r'\1', text)
+
+    # 6. Xử lý \boxed{...} — thay bằng marker để render riêng bằng st.latex()
+    BOXED_MARKER = '%%%BOXED%%%'
     def process_boxed(match):
         content = match.group(1).strip()
-        # Loại bỏ các ký tự lạ
-        content = re.sub(r'^\$+|\$+$', '', content)  # Loại bỏ $ ở đầu/cuối
-        content = re.sub(r'\[.*?\]', '', content)  # Loại bỏ [3] hay bất kỳ [number] nào
-        content = re.sub(r'\\\\', '', content)  # Loại bỏ \\ thừa
-        
-        # Nếu content trống, trả về chuỗi rỗng
-        if not content or content.isspace():
+        # Loại bỏ $ thừa bên trong
+        content = re.sub(r'^\$+|\$+$', '', content).strip()
+        # Loại bỏ [number] references
+        content = re.sub(r'\[\d+\]', '', content).strip()
+        if not content:
             return ''
-        
-        # Đảm bảo content là LaTeX hợp lệ
-        return f'$$\n\\boxed{{{content}}}\n$$'
-    
-    # Tìm và xử lý tất cả các boxed
-    boxed_pattern = r'\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}'
+        return f'\n\n{BOXED_MARKER}{content}{BOXED_MARKER}\n\n'
+
+    # Pattern hỗ trợ nested braces 1 cấp — cũng ăn trailing punctuation
+    boxed_pattern = r'\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}[.,;:!?]*'
     text = re.sub(boxed_pattern, process_boxed, text, flags=re.DOTALL)
-    
-    # 7. Tìm và sửa các lỗi boxed không hoàn chỉnh
-    # Pattern cho boxed bị thiếu dấu }
-    incomplete_boxed = r'\\boxed\{([^}]*)(?=\n|$)'
-    def fix_incomplete_boxed(match):
-        content = match.group(1)
-        return f'\\boxed{{{content}}}'
-    
-    text = re.sub(incomplete_boxed, fix_incomplete_boxed, text)
-    
-    # 8. Sửa các lỗi LaTeX khác
-    # Sửa lỗi frac không đúng: \{frac -> \frac
-    text = re.sub(r'\\\{frac([^{])', r'\\frac{\1', text)
-    # Sửa lỗi dấu ngoặc không khớp
-    text = re.sub(r'\\\{', '{', text)
-    text = re.sub(r'\\\}', '}', text)
-    
-    # 9. Đảm bảo các công thức toán học được hiển thị đẹp
-    lines = text.split('\n')
-    formatted_lines = []
-    
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        
-        # Xử lý các bước đánh số (1., 2., ...)
-        if re.match(r'^\d+\.', stripped):
-            formatted_lines.append(f'\n**{stripped}**')
-        # Xử lý dòng có chứa boxed
-        elif '\\boxed{' in stripped:
-            formatted_lines.append(f'\n{stripped}')
-        # Xử lý dòng có công thức display
-        elif stripped.startswith('$$') or stripped.endswith('$$'):
-            formatted_lines.append(f'\n{stripped}')
-        # Xử lý dòng có kết thúc bằng dấu $ (inline LaTeX)
-        elif stripped.endswith('$') and not stripped.startswith('$'):
-            # Đây có thể là inline LaTeX, thêm newline trước
-            formatted_lines.append(f'\n{stripped}')
-        else:
-            formatted_lines.append(stripped)
-    
-    text = '\n'.join(formatted_lines)
-    
-    # 10. Thêm khoảng cách giữa các bước giải
-    text = re.sub(r'(\n\*\*\d+\.\*\*)', r'\n\n\1', text)
-    
-    # 11. Đảm bảo các công thức LaTeX không bị phá vỡ
-    text = re.sub(r'(?<!\n)\n\$\$', r'\n\n$$', text)
-    text = re.sub(r'\$\$\n(?!\n)', r'$$\n\n', text)
-    
-    # 12. Xử lý dòng trống thừa
+
+    # 6. Sửa boxed không hoàn chỉnh (thiếu dấu })
+    text = re.sub(r'\\boxed\{([^}]*)$', r'\\boxed{\1}', text, flags=re.MULTILINE)
+
+    # 7. Đảm bảo display math ($$) có dòng trống bao quanh
+    text = re.sub(r'(?<!\n)\n(\$\$)', r'\n\n\1', text)
+    text = re.sub(r'(\$\$)\n(?!\n)', r'\1\n\n', text)
+
+    # 8. Định dạng các bước giải (1., 2., ...) thành bold
+    text = re.sub(r'^(\d+\..*)$', r'\n**\1**', text, flags=re.MULTILINE)
+    # Thêm khoảng cách giữa các bước
+    text = re.sub(r'(\n\*\*\d+\.)', r'\n\1', text)
+
+    # 9. Xóa dòng chỉ chứa dấu chấm câu bị tách ra (orphan punctuation)
+    text = re.sub(r'^\s*[.,;:!?]\s*$', '', text, flags=re.MULTILINE)
+
+    # 10. Xử lý dòng trống thừa
     text = re.sub(r'\n{3,}', '\n\n', text)
-    
+
     return text.strip()
+
+def render_response(formatted_text):
+    """
+    Render formatted text, xử lý boxed markers bằng st.latex() để căn giữa.
+    Gọi hàm này thay vì st.markdown() trực tiếp.
+    """
+    BOXED_MARKER = '%%%BOXED%%%'
+    if BOXED_MARKER not in formatted_text:
+        st.markdown(formatted_text)
+        return
+    
+    parts = formatted_text.split(BOXED_MARKER)
+    # parts sẽ là: [text_before, boxed_content, text_after, boxed_content2, text_after2, ...]
+    for i, part in enumerate(parts):
+        part = part.strip()
+        if not part:
+            continue
+        if i % 2 == 1:
+            # Đây là nội dung boxed → render bằng st.latex() (tự động căn giữa)
+            st.latex(r'\boxed{' + part + '}')
+        else:
+            # Text thường → render bằng markdown
+            st.markdown(part)
 
 def extract_boxed_content(boxed_string):
     """Trích xuất nội dung từ chuỗi boxed bị lỗi"""
@@ -216,7 +215,7 @@ with st.sidebar:
     
     if api_url != st.session_state.api_url:
         st.session_state.api_url = api_url.rstrip('/')
-        st.success(f"Connected to: {api_url[:50]}..." if len(api_url) > 50 else f"Connected to: {api_url}")
+        st.success(f"Connected to: Dat1710/Nexus-1.5B")
     
     st.divider()
     
@@ -307,10 +306,10 @@ with col2:
     if st.session_state.api_url:
         try:
             # Kiểm tra health endpoint
-            response = requests.get(f"{st.session_state.api_url}/health", timeout=5)
+            response = requests.get(f"{st.session_state.api_url}/health", timeout=15)
             if response.status_code == 200:
                 data = response.json()
-                st.success(f"✅ Connected to {data.get('model', 'API server')}")
+                st.success(f"✅ Connected to Dat1710/Nexus-1.5B")
             else:
                 st.error("❌ Connection failed")
         except requests.exceptions.ConnectionError:
@@ -331,11 +330,9 @@ with chat_container:
             if "content" in message:
                 content = message["content"]
                 
-                # Format LaTeX
+                # Format LaTeX và hiển thị
                 formatted_content = format_latex_response(content)
-                
-                # Hiển thị với markdown
-                st.markdown(formatted_content)
+                render_response(formatted_content)
                 
             if "response_data" in message:
                 with st.expander("📊 Response Details"):
@@ -367,6 +364,11 @@ if submit_button and prompt.strip():
     user_message = {"role": "user", "content": prompt}
     st.session_state.messages.append(user_message)
     
+    # Hiển thị câu hỏi dạng LaTeX preview trước khi gửi request
+    with st.chat_message("user"):
+        st.markdown("**LaTeX preview:**")
+        st.markdown(format_latex_response(prompt))
+    
     # Check connection
     if not st.session_state.api_url:
         st.error("Vui lòng nhập API URL trong sidebar trước!")
@@ -374,8 +376,9 @@ if submit_button and prompt.strip():
     
     # Show assistant placeholder
     with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        message_placeholder.markdown("⏳ Đang xử lý...")
+        status_msg = st.empty()
+        status_msg.markdown("⏳ Đang xử lý...")
+        response_container = st.container()
         
         # Prepare request
         request_data = {
@@ -394,7 +397,7 @@ if submit_button and prompt.strip():
             response = requests.post(
                 f"{st.session_state.api_url}/generate",
                 json=request_data,
-                timeout=60
+                timeout=300
             )
             
             if response.status_code == 200:
@@ -404,8 +407,10 @@ if submit_button and prompt.strip():
                 # Format response với LaTeX
                 formatted_response = format_latex_response(raw_response)
                 
-                # Hiển thị response
-                message_placeholder.markdown(formatted_response)
+                # Xóa status và hiển thị response
+                status_msg.empty()
+                with response_container:
+                    render_response(formatted_response)
                 
                 # Add assistant message with metadata
                 assistant_message = {
@@ -423,7 +428,7 @@ if submit_button and prompt.strip():
                 
             else:
                 error_msg = f"❌ Lỗi API: {response.status_code} - {response.text}"
-                message_placeholder.markdown(error_msg)
+                status_msg.markdown(error_msg)
                 
         except requests.exceptions.Timeout:
             error_msg = "⏰ Request timeout. Model might be taking too long."
