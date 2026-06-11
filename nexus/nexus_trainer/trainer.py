@@ -71,106 +71,131 @@ class NexusTrainer:
         ctx = torch.no_grad() if no_grad else torch.enable_grad()
         with ctx:
             out = model(input_ids=full_ids)
-            lp = torch.log_softmax(out.logits[0], dim=-1)
+            lp = torch.log_softmax(out.logits[0], dim=-1) # (seq_len, vocab_size)
             resp_ids = full_ids[0, prompt_len:]
-            resp_lp = lp[prompt_len - 1 : full_ids.shape[1] - 1]
-            return resp_lp.gather(1, resp_ids.unsqueeze(-1)).squeeze(-1)
+            resp_lp = lp[prompt_len - 1 : full_ids.shape[1] - 1] # (resp_len, vocab_size)
+            return resp_lp.gather(1, resp_ids.unsqueeze(-1)).squeeze(-1) # (resp_len,) # log-prob của token tiếp theo
 
     # eval per epoch
-    def evaluate(self, val_dataset):
+    def evaluate(self, val_dataset, batch_size: int = 16):
         self.model.eval()
         correct = 0
         total = len(val_dataset)
-        
-        log.info(f"Đang evaluation trên {total} samples...")
-        
+        batch_size = self.cfg.eval_batch_size if hasattr(self.cfg, "eval_batch_size") else batch_size
+        log.info(f"Đang evaluation trên {total} samples với batch_size = {batch_size}...")
         scorer = self.rm_scorer if isinstance(self.rm_scorer, RuleBasedRewardScorer) else RuleBasedRewardScorer(self.device)
         
-        pbar = tqdm(val_dataset, desc="Evaluating", leave=False)
-        
-        for example in pbar:
-            prompt_ids = example["prompt_ids"]
-            gold_answer = example.get("gold_answer", "")
+        for i in tqdm(range(0, total, batch_size), desc="Evaluating"):
+            batch_examples = val_dataset[i : i + batch_size]
             
-            prompt_len = len(prompt_ids)
-            prompt_t = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
-
+            batch_prompts = [example["prompt"] for example in batch_examples]
+            batch_gold_answers = [example.get("gold_answer", "") for example in batch_examples]
+            
+            inputs = self.tokenizer(
+                batch_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.cfg.max_prompt_len
+            ).to(self.device)
+            
+            input_ids = inputs["input_ids"]
+            attention_mask = inputs["attention_mask"]
+            
             with torch.no_grad():
                 with torch.amp.autocast('cuda', enabled=self.cfg.bf16):
                     gen_out = self.model.generate(
-                        prompt_t,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
                         max_new_tokens=self.cfg.max_new_tokens,
-                        temperature=0.0,
                         do_sample=False,
                         pad_token_id=self.tokenizer.eos_token_id,
                     )
             
-            resp_ids = gen_out[0, prompt_len:]
-            pad_mask = (resp_ids != self.tokenizer.eos_token_id) & (resp_ids != self.tokenizer.pad_token_id)
-            actual_len = max(pad_mask.sum().item(), 1)
-            resp_text = self.tokenizer.decode(resp_ids[:actual_len], skip_special_tokens=True)
+            for j, example in enumerate(batch_examples):
+                prompt_len = input_ids.shape[1]
+                resp_ids = gen_out[j, prompt_len:]
+                
+                pad_mask = (resp_ids != self.tokenizer.eos_token_id) & (resp_ids != self.tokenizer.pad_token_id)
+                actual_len = max(pad_mask.sum().item(), 1)
+                
+                resp_text = self.tokenizer.decode(resp_ids[:actual_len], skip_special_tokens=True)
+                
+                # score
+                pred_ans = scorer.extract_boxed_answer(resp_text)
+                if scorer.normalize_answer(pred_ans) == scorer.normalize_answer(batch_gold_answers[j]) and batch_gold_answers[j]:
+                    correct += 1
             
-            # score reward
-            pred_ans = scorer.extract_boxed_answer(resp_text)
-            if scorer.normalize_answer(pred_ans) == scorer.normalize_answer(gold_answer) and gold_answer:
-                correct += 1
-            
-            pbar.set_postfix({"Acc": f"{(correct/(pbar.n+1))*100:.2f}%"})
-            
-            del prompt_t, gen_out
+            # Giải phóng bộ nhớ đệm GPU sau mỗi batch
+            del inputs, gen_out
             torch.cuda.empty_cache()
             
         acc = (correct / total) * 100
-        log.info(f"Evaluate xong. Accuracy = {acc:.2f}% ({correct}/{total})")
+        log.info(f"Evaluated. Accuracy = {acc:.2f}% ({correct}/{total})")
         
         self.model.train()
         return acc
 
     # training loop
-    def train(self):
-        # Prepare Data & Optimizer
+    def train(self, prompt_batch_size: int = 16):
+        prompt_batch_size = self.cfg.train_batch_size if hasattr(self.cfg, "train_batch_size") else prompt_batch_size
         dataset_builder = MathDatasetBuilder(self.cfg.dataset_name, self.cfg.max_prompt_len)
         
         train_dataset = dataset_builder.load_train_data(self.tokenizer)
         val_dataset = dataset_builder.load_val_data(self.tokenizer)
 
         optimizer = AdamW(self.model.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay)
-        total_steps = self.cfg.num_epochs * math.ceil(len(train_dataset) / self.cfg.grad_accum)
+        
+        total_batches = math.ceil(len(train_dataset) / prompt_batch_size)
+        total_steps = self.cfg.num_epochs * total_batches
         scheduler = get_cosine_schedule_with_warmup(optimizer, int(self.cfg.warmup_ratio * total_steps), total_steps)
         
         os.makedirs(self.cfg.output_dir, exist_ok=True)
         global_step, acc_loss, acc_reward = 0, 0.0, 0.0
 
-        # Training Loop
         for epoch in range(self.cfg.num_epochs):
             random.shuffle(train_dataset)
-            log.info(f"Epoch {epoch + 1}/{self.cfg.num_epochs} (TRAIN)")
+            log.info(f"Epoch {epoch + 1}/{self.cfg.num_epochs} - Tổng số batches: {total_batches}, Batch size: {prompt_batch_size}")
             
-            pbar = tqdm(enumerate(train_dataset), total=len(train_dataset), desc=f"Epoch {epoch + 1}/{self.cfg.num_epochs}")
+            pbar = tqdm(range(0, len(train_dataset), prompt_batch_size), desc=f"Epoch {epoch + 1}/{self.cfg.num_epochs}")
 
-            for idx, example in pbar:
-                prompt_ids = example["prompt_ids"]
-                prompt_txt = example["prompt"]
-                gold_answer = example.get("gold_answer", "")
+            for step_idx in pbar:
+                batch_examples = train_dataset[step_idx : step_idx + prompt_batch_size]
+                B = len(batch_examples)
+                
+                prompts = [ex["prompt"] for ex in batch_examples]
+                gold_answers = [ex.get("gold_answer", "") for ex in batch_examples]
 
-                prompt_len = len(prompt_ids)
-                prompt_t = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
+                inputs = self.tokenizer(
+                    prompts, 
+                    return_tensors="pt", 
+                    padding=True, 
+                    truncation=True, 
+                    max_length=self.cfg.max_prompt_len
+                ).to(self.device)
+                
+                # [B, seq_len] -> [BxG, seq_len]
+                input_ids = inputs["input_ids"].repeat_interleave(self.cfg.G, dim=0)
+                attention_mask = inputs["attention_mask"].repeat_interleave(self.cfg.G, dim=0)
+                prompt_len = input_ids.shape[1]
 
-                # Generate responses
                 self.model.eval()
                 with torch.no_grad():
-                    gen_out = self.model.generate(
-                        prompt_t.expand(self.cfg.G, -1),
-                        max_new_tokens=self.cfg.max_new_tokens,
-                        temperature=self.cfg.temperature,
-                        do_sample=True,
-                        pad_token_id=self.tokenizer.eos_token_id,
-                    )
+                    with torch.amp.autocast('cuda', enabled=self.cfg.bf16):
+                        gen_out = self.model.generate(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            max_new_tokens=self.cfg.max_new_tokens,
+                            temperature=self.cfg.temperature,
+                            do_sample=True,
+                            pad_token_id=self.tokenizer.eos_token_id,
+                        )
                 self.model.train()
 
-                # process generations
                 lengths, masks, full_seqs, resp_texts = [], [], [], []
-                for i in range(self.cfg.G):
+                total_generated = B * self.cfg.G
+                
+                for i in range(total_generated):
                     resp_ids = gen_out[i, prompt_len:]
                     pad_mask = (resp_ids != self.tokenizer.eos_token_id) & (resp_ids != self.tokenizer.pad_token_id)
                     actual_len = max(pad_mask.sum().item(), 1)
@@ -180,73 +205,91 @@ class NexusTrainer:
                     full_seqs.append(gen_out[i])
                     resp_texts.append(self.tokenizer.decode(resp_ids[:actual_len], skip_special_tokens=True))
 
-                # Reward
-                if isinstance(self.rm_scorer, RuleBasedRewardScorer):
-                    rewards = self.rm_scorer.get_scores(resp_texts, gold_answer)
-                else:
-                    rewards = self.rm_scorer.get_reward([prompt_txt]*self.cfg.G, resp_texts)
+                # reward & advantage per group
+                all_advs = []
+                batch_mean_reward = 0.0
                 
-                if not isinstance(rewards, torch.Tensor):
-                    rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+                for b in range(B):
+                    # G responses per prompt
+                    start_idx = b * self.cfg.G
+                    end_idx = start_idx + self.cfg.G
+                    group_texts = resp_texts[start_idx : end_idx]
+                    gold = gold_answers[b]
+                    
+                    if isinstance(self.rm_scorer, RuleBasedRewardScorer):
+                        rewards = self.rm_scorer.get_scores(group_texts, gold)
+                    else:
+                        rewards = self.rm_scorer.get_reward([prompts[b]] * self.cfg.G, group_texts)
+                        
+                    if not isinstance(rewards, torch.Tensor):
+                        rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+                        
+                    batch_mean_reward += rewards.mean().item()
 
-                if torch.all(rewards == rewards[0]): 
-                    del gen_out, prompt_t
-                    torch.cuda.empty_cache()
-                    continue 
-                
-                advs = compute_lpro_advantages(rewards.tolist(), lengths, self.cfg.lambda_len)
+                    if torch.all(rewards == rewards[0]):
+                        all_advs.extend([0.0] * self.cfg.G)
+                    else:
+                        group_lens = lengths[start_idx : end_idx]
+                        advs = compute_lpro_advantages(rewards.tolist(), group_lens, self.cfg.lambda_len)
+                        all_advs.extend(advs.tolist())
+                        
+                batch_mean_reward /= B
 
-                # Compute loss
+                # loss + backprop
                 total_loss_sum = torch.tensor(0.0, device=self.device)
                 total_n_tokens = 0
 
-                for i in range(self.cfg.G):
-                    seq = full_seqs[i].unsqueeze(0).to(self.device)[:, :prompt_len + lengths[i]]
+                for i in range(total_generated):
+                    if all_advs[i] == 0.0:
+                        continue
+                        
+                    seq = full_seqs[i].unsqueeze(0).to(self.device)[:, :prompt_len + lengths[i]] # cut padding
                     mask_i = masks[i][:lengths[i]]
 
                     with torch.amp.autocast('cuda', enabled=self.cfg.bf16):
                         new_lp = self.get_resp_log_probs(self.model, seq, prompt_len, no_grad=False)
-                    old_lp = self.get_resp_log_probs(self.ref_model, seq, prompt_len, no_grad=True)
+                        old_lp = self.get_resp_log_probs(self.ref_model, seq, prompt_len, no_grad=True)
 
                     loss_sum, n_valid = compute_dapo_token_loss(
-                        new_lp, old_lp.detach(), float(advs[i]), mask_i, self.cfg.eps_low, self.cfg.eps_high
+                        new_lp, old_lp.detach(), float(all_advs[i]), mask_i, self.cfg.eps_low, self.cfg.eps_high
                     )
                     total_loss_sum += loss_sum
                     total_n_tokens += n_valid
 
                 if total_n_tokens == 0: 
-                    del gen_out, prompt_t, seq, new_lp, old_lp, loss_sum
+                    del gen_out, inputs, input_ids
                     torch.cuda.empty_cache()
                     continue
                 
-                # Backprop
-                loss = total_loss_sum / total_n_tokens / self.cfg.grad_accum
+                # loss averaged over all tokens in the batch
+                loss = total_loss_sum / total_n_tokens
                 loss.backward()
 
-                acc_loss += loss.item() * self.cfg.grad_accum
-                acc_reward += rewards.float().mean().item()
+                acc_loss += loss.item()
+                acc_reward += batch_mean_reward
 
                 pbar.set_postfix({
-                    "loss": f"{loss.item() * self.cfg.grad_accum:.4f}", 
-                    "reward": f"{rewards.float().mean().item():.2f}"
+                    "loss": f"{loss.item():.4f}", 
+                    "reward": f"{batch_mean_reward:.2f}"
                 })
 
-                if (idx + 1) % self.cfg.grad_accum == 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
-                    global_step += 1
+                # optimizer
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
 
-                    if global_step % self.cfg.log_steps == 0:
-                        log.info(f"Step {global_step} | Loss: {acc_loss/self.cfg.log_steps:.4f} | RM Score: {acc_reward/(self.cfg.log_steps*self.cfg.grad_accum):.3f}")
-                        acc_loss, acc_reward = 0.0, 0.0
+                # Logging & Saving
+                if global_step % self.cfg.log_steps == 0:
+                    log.info(f"Step {global_step} | Loss: {acc_loss/self.cfg.log_steps:.4f} | RM Score: {acc_reward/self.cfg.log_steps:.3f}")
+                    acc_loss, acc_reward = 0.0, 0.0
 
-                    if global_step % self.cfg.save_steps == 0:
-                        self.model.save_pretrained(os.path.join(self.cfg.output_dir, f"ckpt-{global_step}"))
-                        self.tokenizer.save_pretrained(os.path.join(self.cfg.output_dir, f"ckpt-{global_step}"))
+                if global_step % self.cfg.save_steps == 0:
+                    self.model.save_pretrained(os.path.join(self.cfg.output_dir, f"ckpt-{global_step}"))
+                    self.tokenizer.save_pretrained(os.path.join(self.cfg.output_dir, f"ckpt-{global_step}"))
 
-                del gen_out, prompt_t, seq, new_lp, old_lp, loss_sum, total_loss_sum
+                del gen_out, inputs, input_ids, seq, new_lp, old_lp, loss_sum, total_loss_sum
                 torch.cuda.empty_cache()
             
             log.info(f"Hoàn thành Train Epoch {epoch + 1}. Bắt đầu Eval...")
@@ -265,13 +308,11 @@ class NexusTrainer:
             else:
                 log.info(f"Đang đẩy model lên Hugging Face Hub ({self.cfg.hub_repo_id})...")
                 try:
-                    # weights
                     self.model.push_to_hub(
                         self.cfg.hub_repo_id, 
                         token=self.cfg.hf_token,
                         commit_message="Upload Nexus Qwen-Math weights"
                     )
-                    # tokenizer
                     self.tokenizer.push_to_hub(
                         self.cfg.hub_repo_id, 
                         token=self.cfg.hf_token,

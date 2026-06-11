@@ -9,8 +9,8 @@ class MathDatasetBuilder:
         self.dataset_name = dataset_name
         self.max_prompt_len = max_prompt_len
         self.system_prompt = (
-            "You are a mathematics expert. "
-            "Solve the problem step by step and enclose your final answer in \\boxed{}."
+            "You are a mathematical reasoning assistant. "
+            "Please reason step by step, and put your final answer within \\boxed{}."
         )
 
     def format_chat_prompt(self, problem: str, tokenizer) -> str:
