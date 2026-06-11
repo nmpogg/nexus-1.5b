@@ -51,7 +51,7 @@ class RuleBasedRewardScorer:
             if norm_pred == norm_gold:
                 rewards.append(1.0)
             else:
-                rewards.append(-0.5)
+                rewards.append(-0.8)
                 
         return torch.tensor(rewards, dtype=torch.float32, device=self.device)
     

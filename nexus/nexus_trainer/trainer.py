@@ -248,7 +248,7 @@ class NexusTrainer:
 
                     with torch.amp.autocast('cuda', enabled=self.cfg.bf16):
                         new_lp = self.get_resp_log_probs(self.model, seq, prompt_len, no_grad=False)
-                        old_lp = self.get_resp_log_probs(self.ref_model, seq, prompt_len, no_grad=True)
+                        old_lp = self.get_resp_log_probs(self.ref_model, seq, prompt_len, no_grad=False)
 
                     loss_sum, n_valid = compute_dapo_token_loss(
                         new_lp, old_lp.detach(), float(all_advs[i]), mask_i, self.cfg.eps_low, self.cfg.eps_high
