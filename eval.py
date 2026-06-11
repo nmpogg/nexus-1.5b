@@ -33,6 +33,7 @@ def parse_args():
     p.add_argument("--task", type=str, required=True, choices=TASKS.keys(), help="Tên Task cần đánh giá")
     p.add_argument("--tp", type=int, default=1, help="Tensor Parallel size (Số lượng GPU muốn dùng, mặc định 1)")
     p.add_argument("--temperature", type=float, default=0.0, help="Greedy decoding = 0.0")
+    p.add_argument("batch_size", type=int, default=16, help="Batch size khi sinh câu trả lời")
     return p.parse_args()
 
 def main():
@@ -59,7 +60,7 @@ def main():
     # Model Evaluator và Generate
     evaluator = MathEvaluator(model_path=args.model_path, tensor_parallel_size=args.tp)
     print(f"Đang sinh câu trả lời cho {len(prompts)} câu hỏi...")
-    predictions = evaluator.generate_answers(prompts, temperature=args.temperature)
+    predictions = evaluator.generate_answers(prompts, temperature=args.temperature, batch_size=args.batch_size)
 
     # Evaluation
     print("Evaluating...")

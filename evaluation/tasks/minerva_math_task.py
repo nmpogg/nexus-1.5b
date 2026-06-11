@@ -101,7 +101,7 @@ class MinervaMathTask(BaseEvalTask):
                 pred_num = float(nums[-1])
                 # Tolerance cho đáp án xấp xỉ (< 2% error)
                 if gold_num != 0:
-                    return abs(pred_num - gold_num) / abs(gold_num) < 0.02
+                    return abs(pred_num - gold_num) / abs(gold_num) <= 0.02
                 else:
                     return abs(pred_num - gold_num) < 1e-6
         except (ValueError, ZeroDivisionError):

@@ -5,7 +5,7 @@ from datasets import load_dataset
 log = logging.getLogger(__name__)
 
 class MathDatasetBuilder:
-    def __init__(self, dataset_name: str, max_prompt_len: int = 512):
+    def __init__(self, dataset_name: str, max_prompt_len: int = 1024):
         self.dataset_name = dataset_name
         self.max_prompt_len = max_prompt_len
         self.system_prompt = (
@@ -48,8 +48,8 @@ class MathDatasetBuilder:
 
         ds = load_dataset(self.dataset_name, split="test") 
         
-        # 100 sample đầu
-        train_ds = ds.select(range(100))
+        # 400 sample đầu
+        train_ds = ds.select(range(400))
         
         out = self._process_dataset(train_ds, tokenizer)
         log.info(f"Đã load {len(out)} training examples.")
@@ -59,8 +59,8 @@ class MathDatasetBuilder:
         log.info(f"Đang load data validation từ {self.dataset_name}...")
         ds = load_dataset(self.dataset_name, split="test") 
         
-        # 400 sample 
-        val_ds = ds.select(range(100, len(ds)))
+        # 100 sample 
+        val_ds = ds.select(range(400, len(ds)))
         
         out = self._process_dataset(val_ds, tokenizer)
         log.info(f"Đã load {len(out)} validation examples.")

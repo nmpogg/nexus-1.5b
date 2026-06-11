@@ -1,14 +1,13 @@
-import re
 from datasets import load_dataset, concatenate_datasets
 from typing import List, Dict, Tuple
 from evaluation.tasks.base_task import BaseEvalTask
-from evaluation.metrics import check_correctness
+from evaluation.metrics import check_correctness, extract_boxed_answer, normalize_math_string
 
 class MathTask(BaseEvalTask):
     def __init__(self, num_shots: int = 4):
         super().__init__(dataset_name="EleutherAI/hendrycks_math", split="test", num_shots=num_shots)
 
-        self.system_prompt = "You are a mathematics expert. Solve the problem step by step."
+        self.system_prompt = "You are a mathematics expert. Solve the problem step by step and enclose your final answer in \\boxed{}."
         
         # 7 subset
         self.subsets = [
@@ -73,6 +72,7 @@ class MathTask(BaseEvalTask):
     def evaluate_correctness(self, prediction: str, gold_answer: str) -> bool:
 
         # \boxed{}
+        gold_answer = extract_boxed_answer(gold_answer)
         is_correct = check_correctness(prediction, gold_answer)
         if is_correct:
             return True
@@ -86,8 +86,7 @@ class MathTask(BaseEvalTask):
             pred_ans = matches[-1].strip()
             if pred_ans.endswith("."):
                 pred_ans = pred_ans[:-1]
-                
-            from evaluation.metrics import normalize_math_string
+            
             return normalize_math_string(pred_ans) == normalize_math_string(gold_answer)
             
         return False

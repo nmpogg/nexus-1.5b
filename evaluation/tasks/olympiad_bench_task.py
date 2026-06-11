@@ -82,7 +82,7 @@ class OlympiadBenchTask(BaseEvalTask):
             if nums:
                 pred_num = float(nums[-1])
                 if gold_num != 0:
-                    return abs(pred_num - gold_num) / abs(gold_num) < 0.02
+                    return abs(pred_num - gold_num) / abs(gold_num) <= 0.02
                 return abs(pred_num - gold_num) < 1e-6
         except (ValueError, ZeroDivisionError):
             pass

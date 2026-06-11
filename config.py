@@ -18,7 +18,7 @@ class Config:
     # group sampling
     G               : int   = 32
     max_new_tokens  : int   = 2048
-    temperature     : float = 0.7
+    temperature     : float = 0.5
     top_p           : float = 0.95
 
     # LPRO params
@@ -42,7 +42,7 @@ class Config:
     weight_decay    : float = 1e-2
     warmup_ratio    : float = 0.05
     grad_clip       : float = 1.0
-    grad_accum      : int   = 8      
+    grad_accum      : int   = 16      
     bf16            : bool  = True
 
     # logging
@@ -67,7 +67,7 @@ def parse_args() -> Config:
     p.add_argument("--eps_high",      type=float, default=0.28)
     p.add_argument("--max_new_tokens",type=int,   default=1024)
     p.add_argument("--temperature",   type=float, default=0.70)
-    p.add_argument("--grad_accum",    type=int,   default=8)
+    p.add_argument("--grad_accum",    type=int,   default=16)
     p.add_argument("--save_steps",    type=int,   default=100)
     p.add_argument("--no_push",       action="store_true")
     p.add_argument("--hf_token",      default=os.getenv("HF_TOKEN", ""))
