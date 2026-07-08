@@ -5,10 +5,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+try:
+    from transformers import TextIteratorStreamer
+    _HAS_TEXT_ITERATOR_STREAMER = True
+except Exception:
+    _HAS_TEXT_ITERATOR_STREAMER = False
+from fastapi.responses import StreamingResponse
+import json
 import uvicorn
 import threading
 import time
 import sys
+from fastapi.responses import StreamingResponse
+import json
+try:
+    from transformers import TextIteratorStreamer
+    _HAS_TEXT_ITERATOR_STREAMER = True
+except Exception:
+    _HAS_TEXT_ITERATOR_STREAMER = False
 
 # Cho phép nested event loops
 nest_asyncio.apply()
@@ -46,6 +60,7 @@ class GenerationRequest(BaseModel):
     temperature: float = 0.7
     top_p: float = 0.9
     system_message: str = None
+    stream: bool = False
 
 @app.get("/")
 async def root():
@@ -72,7 +87,7 @@ async def generate_response(request: GenerationRequest):
             {"role": "user", "content": request.prompt}
         ]
 
-        # Tokenize
+        # Tokenize / build chat prompt
         text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -81,7 +96,44 @@ async def generate_response(request: GenerationRequest):
 
         model_inputs = tokenizer([text], return_tensors="pt").to(device)
 
-        # Generate
+        # If client requested streaming, return Server-Sent Events (SSE)
+        if getattr(request, "stream", False):
+            if not _HAS_TEXT_ITERATOR_STREAMER:
+                raise HTTPException(status_code=500, detail="TextIteratorStreamer not available in this transformers installation")
+
+            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+            gen_kwargs = {
+                "input_ids": model_inputs["input_ids"],
+                "max_new_tokens": request.max_new_tokens,
+                "temperature": request.temperature,
+                "top_p": request.top_p,
+                "do_sample": True,
+                "pad_token_id": tokenizer.eos_token_id,
+                "streamer": streamer,
+            }
+            if "attention_mask" in model_inputs:
+                gen_kwargs["attention_mask"] = model_inputs["attention_mask"]
+
+            thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
+            thread.start()
+
+            def event_stream():
+                try:
+                    for chunk in streamer:
+                        if chunk is None:
+                            continue
+                        payload = {"delta": chunk}
+                        yield f"data: {json.dumps(payload)}\n\n"
+                    # send final message
+                    footer = {"done": True, "model": model_name}
+                    yield f"data: {json.dumps(footer)}\n\n"
+                except GeneratorExit:
+                    return
+
+            return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+        # Non-streaming generation (original behavior)
         with torch.no_grad():
             generated_ids = model.generate(
                 **model_inputs,
@@ -114,6 +166,89 @@ async def generate_response(request: GenerationRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Streaming SSE endpoint
+@app.post("/generate_stream")
+async def generate_stream(request: GenerationRequest):
+    def event_stream():
+        try:
+            if request.system_message:
+                system_content = request.system_message
+            elif request.reasoning_method == "CoT":
+                system_content = "Please reason step by step, and put your final answer within \\boxed{}."
+            else:  # TIR
+                system_content = "Please integrate natural language reasoning with programs to solve the problem above, and put your final answer within \\boxed{}."
+
+            messages = [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": request.prompt}
+            ]
+
+            # Build text input (fallback to simple concat if helper missing)
+            try:
+                text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+            except Exception:
+                text = system_content + "\n" + request.prompt
+
+            model_inputs = tokenizer([text], return_tensors="pt").to(device)
+
+            if _HAS_TEXT_ITERATOR_STREAMER:
+                streamer = TextIteratorStreamer(tokenizer, skip_special_tokens=True, timeout=60.0)
+                generate_kwargs = dict(
+                    input_ids=model_inputs.input_ids,
+                    attention_mask=model_inputs.attention_mask if "attention_mask" in model_inputs else None,
+                    max_new_tokens=request.max_new_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    do_sample=True,
+                    pad_token_id=tokenizer.eos_token_id,
+                    streamer=streamer
+                )
+                generate_kwargs = {k: v for k, v in generate_kwargs.items() if v is not None}
+
+                thread = threading.Thread(target=model.generate, kwargs=generate_kwargs)
+                thread.start()
+
+                for new_text in streamer:
+                    if new_text is None:
+                        continue
+                    sse_data = "data: " + new_text.replace("\n", "\ndata: ") + "\n\n"
+                    yield sse_data
+
+                yield "data: [DONE]\n\n"
+            else:
+                # Fallback: generate full response then stream in chunks
+                with torch.no_grad():
+                    generated_ids = model.generate(
+                        **model_inputs,
+                        max_new_tokens=request.max_new_tokens,
+                        temperature=request.temperature,
+                        top_p=request.top_p,
+                        do_sample=True,
+                        pad_token_id=tokenizer.eos_token_id
+                    )
+
+                generated_ids = [
+                    output_ids[len(input_ids):]
+                    for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+                ]
+
+                response_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                for i in range(0, len(response_text), 64):
+                    chunk = response_text[i:i+64]
+                    yield "data: " + chunk.replace("\n", "\ndata: ") + "\n\n"
+                    time.sleep(0.05)
+                yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            yield f"data: [ERROR] {str(e)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 # cell 3: Hàm khởi chạy server trong thread riêng
 def run_server():

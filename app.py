@@ -157,28 +157,29 @@ def format_latex_response(text):
 
     return text.strip()
 
-def render_response(formatted_text):
+def render_response(formatted_text, target=None):
     """
-    Render formatted text, xử lý boxed markers bằng st.latex() để căn giữa.
-    Gọi hàm này thay vì st.markdown() trực tiếp.
+    Render formatted text. If `target` (a Streamlit DeltaGenerator) is provided,
+    render into it (overwrites previous content). Otherwise render to main app.
+    Handles boxed markers by rendering them with `latex()`.
     """
     BOXED_MARKER = '%%%BOXED%%%'
+    writer = target if target is not None else st
+
     if BOXED_MARKER not in formatted_text:
-        st.markdown(formatted_text)
+        writer.markdown(formatted_text)
         return
-    
+
     parts = formatted_text.split(BOXED_MARKER)
-    # parts sẽ là: [text_before, boxed_content, text_after, boxed_content2, text_after2, ...]
+    # parts: [text_before, boxed_content, text_after, ...]
     for i, part in enumerate(parts):
         part = part.strip()
         if not part:
             continue
         if i % 2 == 1:
-            # Đây là nội dung boxed → render bằng st.latex() (tự động căn giữa)
-            st.latex(r'\boxed{' + part + '}')
+            writer.latex(r'\boxed{' + part + '}')
         else:
-            # Text thường → render bằng markdown
-            st.markdown(part)
+            writer.markdown(part)
 
 def extract_boxed_content(boxed_string):
     """Trích xuất nội dung từ chuỗi boxed bị lỗi"""
@@ -257,6 +258,12 @@ with st.sidebar:
         "Custom System Message (Optional)",
         height=100,
         help="Ghi đè system message mặc định"
+    )
+    
+    use_streaming = st.checkbox(
+        "Enable streaming responses (SSE)",
+        value=True,
+        help="Enable incremental updates from the model (Server-Sent Events)"
     )
     
     st.divider()
@@ -373,45 +380,127 @@ if submit_button and prompt.strip():
     if not st.session_state.api_url:
         st.error("Vui lòng nhập API URL trong sidebar trước!")
         st.rerun()
-    
+
     # Show assistant placeholder
     with st.chat_message("assistant"):
         status_msg = st.empty()
         status_msg.markdown("⏳ Đang xử lý...")
         response_container = st.container()
-        
-        # Prepare request
-        request_data = {
-            "prompt": prompt,
-            "reasoning_method": reasoning_method,
-            "max_new_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p
-        }
-        
-        if custom_system.strip():
-            request_data["system_message"] = custom_system
-        
-        try:
-            # Send request to Colab API
-            response = requests.post(
-                f"{st.session_state.api_url}/generate",
-                json=request_data,
-                timeout=300
-            )
-            
+        response_placeholder = response_container.empty()
+
+    # Prepare request
+    request_data = {
+        "prompt": prompt,
+        "reasoning_method": reasoning_method,
+        "max_new_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": top_p
+    }
+    
+    if custom_system.strip():
+        request_data["system_message"] = custom_system
+
+    try:
+        # Send request to Colab API
+        # If streaming enabled, request SSE stream from the server and update UI incrementally
+        if use_streaming:
+            request_data["stream"] = True
+            try:
+                resp = requests.post(
+                    f"{st.session_state.api_url}/generate",
+                    json=request_data,
+                    stream=True,
+                    timeout=3600
+                )
+            except Exception as e:
+                status_msg.markdown(f"❌ Lỗi kết nối: {str(e)}")
+                raise
+
+            if resp.status_code != 200:
+                status_msg.markdown(f"❌ Lỗi API: {resp.status_code} - {resp.text}")
+            else:
+                acc = ""
+                event_lines = []
+                try:
+                    for raw_line in resp.iter_lines(decode_unicode=True):
+                        if raw_line is None:
+                            continue
+                        line = raw_line if isinstance(raw_line, str) else raw_line.decode()
+                        # SSE: lines start with 'data:'
+                        if line.startswith('data:'):
+                            payload = line[len('data:'):].lstrip()
+                            event_lines.append(payload)
+                            continue
+                        if line.strip() == '':
+                            if not event_lines:
+                                continue
+                            event_data = "\n".join(event_lines)
+                            event_lines = []
+                            # handle control tokens
+                            if event_data == '[DONE]':
+                                break
+                            if event_data.startswith('[ERROR]'):
+                                status_msg.markdown(f"❌ Server error: {event_data}")
+                                break
+                            # Try parse JSON payload (server /generate sends JSON events)
+                            try:
+                                parsed = json.loads(event_data)
+                                if isinstance(parsed, dict) and 'delta' in parsed:
+                                    chunk = parsed.get('delta', '')
+                                    acc += chunk
+                                elif isinstance(parsed, dict) and parsed.get('done'):
+                                    break
+                                else:
+                                    acc += event_data
+                            except Exception:
+                                # treat as plain text
+                                acc += event_data
+
+                            # render current accumulated text into placeholder (replace previous)
+                            status_msg.empty()
+                            render_response(format_latex_response(acc), target=response_placeholder)
+                    # stream finished
+                finally:
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+
+                status_msg.empty()
+                assistant_message = {
+                    "role": "assistant",
+                    "content": acc,
+                    "formatted_content": format_latex_response(acc),
+                    "response_data": {
+                        "model": None,
+                        "status": "streamed",
+                        "timestamp": datetime.now().isoformat(),
+                        "parameters": {k: request_data.get(k) for k in ["reasoning_method","max_new_tokens","temperature","top_p"]}
+                    }
+                }
+                st.session_state.messages.append(assistant_message)
+        else:
+            try:
+                response = requests.post(
+                    f"{st.session_state.api_url}/generate",
+                    json=request_data,
+                    timeout=300
+                )
+            except Exception as e:
+                status_msg.markdown(f"❌ Lỗi kết nối: {str(e)}")
+                raise
+
             if response.status_code == 200:
                 result = response.json()
                 raw_response = result.get("response", "")
-                
+
                 # Format response với LaTeX
                 formatted_response = format_latex_response(raw_response)
-                
-                # Xóa status và hiển thị response
+
+                # Xóa status và hiển thị response into placeholder
                 status_msg.empty()
-                with response_container:
-                    render_response(formatted_response)
-                
+                render_response(formatted_response, target=response_placeholder)
+
                 # Add assistant message with metadata
                 assistant_message = {
                     "role": "assistant",
@@ -425,18 +514,18 @@ if submit_button and prompt.strip():
                     }
                 }
                 st.session_state.messages.append(assistant_message)
-                
+
             else:
                 error_msg = f"❌ Lỗi API: {response.status_code} - {response.text}"
                 status_msg.markdown(error_msg)
-                
-        except requests.exceptions.Timeout:
-            error_msg = "⏰ Request timeout. Model might be taking too long."
-            message_placeholder.markdown(error_msg)
-            
-        except Exception as e:
-            error_msg = f"❌ Lỗi kết nối: {str(e)}"
-            message_placeholder.markdown(error_msg)
+
+    except requests.exceptions.Timeout:
+        error_msg = "⏰ Request timeout. Model might be taking too long."
+        status_msg.markdown(error_msg)
+
+    except Exception as e:
+        error_msg = f"❌ Lỗi kết nối: {str(e)}"
+        status_msg.markdown(error_msg)
     
     # Force rerun để cập nhật giao diện
     st.rerun()
